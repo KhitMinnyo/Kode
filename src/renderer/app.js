@@ -53,6 +53,7 @@
     showWelcome();
     setupInputListeners();
     setupStreamListeners();
+    setupSettingsListeners();
     await checkConnection();
     await loadModels();
     await loadProjectFolder();
@@ -68,26 +69,28 @@
      ========================================================== */
   async function checkConnection() {
     try {
-      const { connected } = await window.kode.checkConnection();
-      updateConnectionUI(connected);
-      return connected;
+      const result = await window.kode.checkConnection();
+      updateConnectionUI(result.connected, result.provider);
+      return result.connected;
     } catch {
       updateConnectionUI(false);
       return false;
     }
   }
 
-  function updateConnectionUI(connected) {
+  function updateConnectionUI(connected, provider) {
     const dot = statusDot();
     const label = statusLabel();
     if (!dot || !label) return;
 
+    const providerLabel = provider === 'deepseek' ? 'DeepSeek' : 'Ollama';
+
     if (connected) {
       dot.classList.add('connected');
-      label.textContent = 'Ollama Connected';
+      label.textContent = `${providerLabel} Connected`;
     } else {
       dot.classList.remove('connected');
-      label.textContent = 'Disconnected';
+      label.textContent = `${providerLabel} Disconnected`;
     }
   }
 
@@ -1019,5 +1022,232 @@
     const days = Math.floor(hrs / 24);
     if (days < 7) return `${days}d ago`;
     return new Date(timestamp).toLocaleDateString();
+  }
+
+  /* ==========================================================
+     Settings Modal
+     ========================================================== */
+  function setupSettingsListeners() {
+    const settingsBtn = document.getElementById('settings-btn');
+    const overlay = document.getElementById('settings-overlay');
+    const closeBtn = document.getElementById('settings-close-btn');
+    const cancelBtn = document.getElementById('settings-cancel-btn');
+    const saveBtn = document.getElementById('settings-save-btn');
+
+    // Open
+    if (settingsBtn) settingsBtn.addEventListener('click', openSettings);
+
+    // Close
+    if (closeBtn) closeBtn.addEventListener('click', closeSettings);
+    if (cancelBtn) cancelBtn.addEventListener('click', closeSettings);
+
+    // Close on overlay click (not modal itself)
+    if (overlay) {
+      overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) closeSettings();
+      });
+    }
+
+    // Close on Escape
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && overlay && overlay.classList.contains('active')) {
+        closeSettings();
+      }
+    });
+
+    // Save
+    if (saveBtn) saveBtn.addEventListener('click', saveSettingsHandler);
+
+    // Provider tabs
+    const tabOllama = document.getElementById('tab-ollama');
+    const tabDeepseek = document.getElementById('tab-deepseek');
+
+    if (tabOllama) tabOllama.addEventListener('click', () => switchProviderTab('ollama'));
+    if (tabDeepseek) tabDeepseek.addEventListener('click', () => switchProviderTab('deepseek'));
+
+    // Test buttons
+    const testOllama = document.getElementById('test-ollama-btn');
+    const testDeepseek = document.getElementById('test-deepseek-btn');
+
+    if (testOllama) testOllama.addEventListener('click', testOllamaConnection);
+    if (testDeepseek) testDeepseek.addEventListener('click', testDeepseekConnection);
+
+    // API key visibility toggle
+    const toggleVis = document.getElementById('toggle-key-vis');
+    if (toggleVis) {
+      toggleVis.addEventListener('click', () => {
+        const input = document.getElementById('deepseek-key');
+        if (!input) return;
+        if (input.type === 'password') {
+          input.type = 'text';
+          toggleVis.textContent = '🙈';
+        } else {
+          input.type = 'password';
+          toggleVis.textContent = '👁';
+        }
+      });
+    }
+  }
+
+  async function openSettings() {
+    const overlay = document.getElementById('settings-overlay');
+    if (!overlay) return;
+
+    // Load current settings
+    try {
+      const settings = await window.kode.getSettings();
+      const hostInput = document.getElementById('ollama-host');
+      const portInput = document.getElementById('ollama-port');
+      const keyInput = document.getElementById('deepseek-key');
+
+      if (hostInput) hostInput.value = settings.ollamaHost || 'localhost';
+      if (portInput) portInput.value = settings.ollamaPort || 11434;
+      if (keyInput) keyInput.value = settings.deepseekApiKey || '';
+
+      switchProviderTab(settings.provider || 'ollama');
+    } catch (err) {
+      console.error('Failed to load settings:', err);
+    }
+
+    // Clear previous test results
+    clearTestResults();
+
+    overlay.classList.add('active');
+  }
+
+  function closeSettings() {
+    const overlay = document.getElementById('settings-overlay');
+    if (overlay) overlay.classList.remove('active');
+  }
+
+  function switchProviderTab(provider) {
+    // Update tab buttons
+    document.querySelectorAll('.provider-tab').forEach(tab => {
+      tab.classList.toggle('active', tab.dataset.provider === provider);
+    });
+
+    // Update config panels
+    document.getElementById('config-ollama')?.classList.toggle('active', provider === 'ollama');
+    document.getElementById('config-deepseek')?.classList.toggle('active', provider === 'deepseek');
+  }
+
+  function getSelectedProvider() {
+    const activeTab = document.querySelector('.provider-tab.active');
+    return activeTab ? activeTab.dataset.provider : 'ollama';
+  }
+
+  async function testOllamaConnection() {
+    const btn = document.getElementById('test-ollama-btn');
+    const resultEl = document.getElementById('ollama-result');
+    const host = document.getElementById('ollama-host')?.value?.trim() || 'localhost';
+    const port = parseInt(document.getElementById('ollama-port')?.value, 10) || 11434;
+
+    if (!btn || !resultEl) return;
+
+    btn.classList.add('testing');
+    btn.innerHTML = '<span>⏳</span> Testing...';
+    resultEl.className = 'connection-result';
+    resultEl.classList.remove('visible');
+
+    try {
+      const result = await window.kode.testConnection({
+        provider: 'ollama',
+        ollamaHost: host,
+        ollamaPort: port,
+      });
+
+      resultEl.classList.add('visible');
+      if (result.connected) {
+        resultEl.className = 'connection-result visible success';
+        resultEl.textContent = `✅ Connected to Ollama at ${host}:${port}`;
+      } else {
+        resultEl.className = 'connection-result visible error';
+        resultEl.textContent = `❌ Cannot connect: ${result.error || 'Unknown error'}`;
+      }
+    } catch (err) {
+      resultEl.className = 'connection-result visible error';
+      resultEl.textContent = `❌ Error: ${err.message}`;
+    } finally {
+      btn.classList.remove('testing');
+      btn.innerHTML = '<span>🔍</span> Test Connection';
+    }
+  }
+
+  async function testDeepseekConnection() {
+    const btn = document.getElementById('test-deepseek-btn');
+    const resultEl = document.getElementById('deepseek-result');
+    const apiKey = document.getElementById('deepseek-key')?.value?.trim() || '';
+
+    if (!btn || !resultEl) return;
+
+    if (!apiKey) {
+      resultEl.className = 'connection-result visible error';
+      resultEl.textContent = '❌ Please enter an API key';
+      return;
+    }
+
+    btn.classList.add('testing');
+    btn.innerHTML = '<span>⏳</span> Testing...';
+    resultEl.className = 'connection-result';
+    resultEl.classList.remove('visible');
+
+    try {
+      const result = await window.kode.testConnection({
+        provider: 'deepseek',
+        deepseekApiKey: apiKey,
+      });
+
+      resultEl.classList.add('visible');
+      if (result.connected) {
+        resultEl.className = 'connection-result visible success';
+        resultEl.textContent = '✅ DeepSeek API key is valid';
+      } else {
+        resultEl.className = 'connection-result visible error';
+        resultEl.textContent = `❌ Invalid: ${result.error || 'Authentication failed'}`;
+      }
+    } catch (err) {
+      resultEl.className = 'connection-result visible error';
+      resultEl.textContent = `❌ Error: ${err.message}`;
+    } finally {
+      btn.classList.remove('testing');
+      btn.innerHTML = '<span>🔍</span> Test API Key';
+    }
+  }
+
+  function clearTestResults() {
+    ['ollama-result', 'deepseek-result'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) {
+        el.className = 'connection-result';
+        el.textContent = '';
+      }
+    });
+  }
+
+  async function saveSettingsHandler() {
+    const provider = getSelectedProvider();
+    const host = document.getElementById('ollama-host')?.value?.trim() || 'localhost';
+    const port = parseInt(document.getElementById('ollama-port')?.value, 10) || 11434;
+    const apiKey = document.getElementById('deepseek-key')?.value?.trim() || '';
+
+    try {
+      const result = await window.kode.saveSettings({
+        provider,
+        ollamaHost: host,
+        ollamaPort: port,
+        deepseekApiKey: apiKey,
+      });
+
+      if (result.success) {
+        closeSettings();
+        // Refresh connection status and models
+        await checkConnection();
+        await loadModels();
+      } else {
+        console.error('Failed to save settings:', result.error);
+      }
+    } catch (err) {
+      console.error('Failed to save settings:', err);
+    }
   }
 })();

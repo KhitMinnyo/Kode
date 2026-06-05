@@ -5,6 +5,7 @@ const path = require('path');
 const fs = require('fs');
 
 const OllamaClient = require('./src/ollama/client');
+const DeepSeekClient = require('./src/deepseek/client');
 const AgentCore = require('./src/agent/core');
 
 // ─── Globals ─────────────────────────────────────────────────────────────────
@@ -12,7 +13,52 @@ const AgentCore = require('./src/agent/core');
 let mainWindow = null;
 let projects = [];         // Array of { path, name }
 let activeProjectIndex = -1;
-const ollamaClient = new OllamaClient('http://localhost:11434');
+
+// ─── Settings ────────────────────────────────────────────────────────────────
+const SETTINGS_FILE = path.join(app.getPath('userData'), 'kode-settings.json');
+
+function loadSettings() {
+  try {
+    if (fs.existsSync(SETTINGS_FILE)) {
+      const data = fs.readFileSync(SETTINGS_FILE, 'utf-8');
+      return { ...getDefaultSettings(), ...JSON.parse(data) };
+    }
+  } catch (err) {
+    console.error('Failed to load settings:', err.message);
+  }
+  return getDefaultSettings();
+}
+
+function getDefaultSettings() {
+  return {
+    provider: 'ollama',          // 'ollama' or 'deepseek'
+    ollamaHost: 'localhost',     // Ollama server hostname/IP
+    ollamaPort: 11434,           // Ollama server port
+    deepseekApiKey: '',          // DeepSeek API key
+  };
+}
+
+function saveSettings(newSettings) {
+  try {
+    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(newSettings, null, 2), 'utf-8');
+  } catch (err) {
+    console.error('Failed to save settings:', err.message);
+  }
+}
+
+function buildOllamaUrl(host, port) {
+  return `http://${host || 'localhost'}:${port || 11434}`;
+}
+
+let appSettings = loadSettings();
+let ollamaClient = new OllamaClient(buildOllamaUrl(appSettings.ollamaHost, appSettings.ollamaPort));
+let deepseekClient = new DeepSeekClient(appSettings.deepseekApiKey || '');
+
+// Active client depends on provider setting
+function getActiveClient() {
+  return appSettings.provider === 'deepseek' ? deepseekClient : ollamaClient;
+}
+
 const agentCore = new AgentCore(ollamaClient);
 
 // ─── Chat Storage ────────────────────────────────────────────────────────────
@@ -85,7 +131,8 @@ function createMainWindow() {
     height: 800,
     minWidth: 900,
     minHeight: 600,
-    titleBarStyle: 'hiddenInset',
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
+    frame: process.platform !== 'darwin' ? true : undefined,
     backgroundColor: '#0a0a1a',
     icon: path.join(__dirname, 'icon.png'),
     show: false, // Show when ready to prevent visual flash
@@ -123,11 +170,12 @@ function registerIPCHandlers() {
    */
   ipcMain.handle('list-models', async () => {
     try {
-      const models = await ollamaClient.listModels();
-      return { success: true, models };
+      const client = getActiveClient();
+      const models = await client.listModels();
+      return { success: true, models, provider: appSettings.provider };
     } catch (err) {
       console.error('[IPC:list-models] Error:', err.message);
-      return { success: false, error: err.message, models: [] };
+      return { success: false, error: err.message, models: [], provider: appSettings.provider };
     }
   });
 
@@ -136,11 +184,12 @@ function registerIPCHandlers() {
    */
   ipcMain.handle('check-connection', async () => {
     try {
-      const status = await ollamaClient.checkConnection();
-      return status;
+      const client = getActiveClient();
+      const status = await client.checkConnection();
+      return { ...status, provider: appSettings.provider };
     } catch (err) {
       console.error('[IPC:check-connection] Error:', err.message);
-      return { connected: false, error: err.message };
+      return { connected: false, error: err.message, provider: appSettings.provider };
     }
   });
 
@@ -455,6 +504,58 @@ function registerIPCHandlers() {
     }
 
     return { success: true, tree: buildTree(rootPath, 0), root: rootPath };
+  });
+
+  // ─── Settings Handlers ──────────────────────────────────────────────────────
+
+  /**
+   * Get current settings
+   */
+  ipcMain.handle('get-settings', () => {
+    return appSettings;
+  });
+
+  /**
+   * Save settings and reconfigure clients
+   */
+  ipcMain.handle('save-settings', async (event, newSettings) => {
+    try {
+      appSettings = { ...getDefaultSettings(), ...newSettings };
+      saveSettings(appSettings);
+
+      // Reconfigure Ollama client with new host
+      ollamaClient.updateBaseUrl(buildOllamaUrl(appSettings.ollamaHost, appSettings.ollamaPort));
+
+      // Reconfigure DeepSeek client with new API key
+      deepseekClient.updateApiKey(appSettings.deepseekApiKey || '');
+
+      // Update AgentCore's client reference based on provider
+      agentCore.ollamaClient = getActiveClient();
+
+      return { success: true, settings: appSettings };
+    } catch (err) {
+      console.error('[IPC:save-settings] Error:', err.message);
+      return { success: false, error: err.message };
+    }
+  });
+
+  /**
+   * Test connection to a specific host (without saving)
+   */
+  ipcMain.handle('test-connection', async (event, { provider, ollamaHost, ollamaPort, deepseekApiKey }) => {
+    try {
+      if (provider === 'deepseek') {
+        const testClient = new DeepSeekClient(deepseekApiKey || '');
+        const status = await testClient.checkConnection();
+        return status;
+      } else {
+        const testClient = new OllamaClient(buildOllamaUrl(ollamaHost, ollamaPort));
+        const status = await testClient.checkConnection();
+        return status;
+      }
+    } catch (err) {
+      return { connected: false, error: err.message };
+    }
   });
 }
 

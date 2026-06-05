@@ -9,6 +9,9 @@ out/
 *.zip
 *.exe
 *.AppImage
+*.deb
+*.rpm
+*.snap
 builder-debug.yml
 # macOS
 .DS_Store

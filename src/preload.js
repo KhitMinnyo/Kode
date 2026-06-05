@@ -142,4 +142,15 @@ contextBridge.exposeInMainWorld('kode', {
    * @returns {Promise<{success: boolean, tree?: Array, root?: string}>}
    */
   listFileTree: (rootPath, maxDepth) => ipcRenderer.invoke('list-file-tree', rootPath, maxDepth),
+
+  // ─── Settings APIs ──────────────────────────────────────────────────────────
+
+  /** Get current app settings. */
+  getSettings: () => ipcRenderer.invoke('get-settings'),
+
+  /** Save app settings. */
+  saveSettings: (settings) => ipcRenderer.invoke('save-settings', settings),
+
+  /** Test connection to a provider without saving. */
+  testConnection: (params) => ipcRenderer.invoke('test-connection', params),
 });

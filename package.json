@@ -9,7 +9,9 @@
     "dev": "electron . --dev",
     "build": "electron-builder --mac",
     "build:dmg": "electron-builder --mac dmg",
-    "build:zip": "electron-builder --mac zip"
+    "build:zip": "electron-builder --mac zip",
+    "build:linux": "electron-builder --linux",
+    "build:deb": "electron-builder --linux deb"
   },
   "author": "Kode",
   "license": "MIT",
@@ -49,6 +51,39 @@
           "path": "/Applications"
         }
       ]
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "deb",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "category": "Development",
+      "icon": "icon.png",
+      "desktop": {
+        "Name": "Kode",
+        "Comment": "AI Coding & Cybersecurity Agent",
+        "Terminal": "false",
+        "Categories": "Development;Utility;"
+      }
+    },
+    "deb": {
+      "depends": [
+        "libgtk-3-0",
+        "libnotify4",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils",
+        "libatspi2.0-0",
+        "libuuid1",
+        "libsecret-1-0"
+      ],
+      "priority": "optional"
     },
     "files": [
       "main.js",

@@ -77,11 +77,15 @@
         </div>
       </div>
 
-      <!-- New Chat -->
+      <!-- New Chat + Settings -->
       <div class="sidebar-bottom">
         <button class="sidebar-btn new-chat-btn" id="new-chat-btn">
           <span class="btn-icon">＋</span>
           <span>New Chat</span>
+        </button>
+        <button class="settings-btn" id="settings-btn">
+          <span class="btn-icon">⚙️</span>
+          <span>Settings</span>
         </button>
       </div>
 
@@ -128,6 +132,97 @@
       </div>
 
     </main>
+  </div>
+
+  <!-- ====================== Settings Modal ====================== -->
+  <div class="settings-overlay" id="settings-overlay">
+    <div class="settings-modal">
+
+      <!-- Header -->
+      <div class="settings-header">
+        <h2>⚙️ Settings</h2>
+        <button class="settings-close-btn" id="settings-close-btn">✕</button>
+      </div>
+
+      <!-- Body -->
+      <div class="settings-body">
+
+        <!-- Provider Selection -->
+        <div class="settings-group">
+          <div class="settings-group-title">
+            <span class="group-icon">🔌</span>
+            AI Provider
+          </div>
+          <div class="provider-tabs">
+            <button class="provider-tab active" data-provider="ollama" id="tab-ollama">
+              <span class="tab-icon">🦙</span>
+              Ollama (Local)
+            </button>
+            <button class="provider-tab" data-provider="deepseek" id="tab-deepseek">
+              <span class="tab-icon">🧠</span>
+              DeepSeek API
+            </button>
+          </div>
+        </div>
+
+        <!-- Ollama Config -->
+        <div class="provider-config active" id="config-ollama">
+          <div class="settings-group">
+            <div class="settings-group-title">
+              <span class="group-icon">🌐</span>
+              Ollama Server
+            </div>
+            <div class="settings-ip-row">
+              <div class="settings-field ip-field">
+                <label for="ollama-host">Host / IP Address</label>
+                <input type="text" id="ollama-host" placeholder="localhost" value="localhost" />
+              </div>
+              <div class="settings-field port-field">
+                <label for="ollama-port">Port</label>
+                <input type="number" id="ollama-port" placeholder="11434" value="11434" />
+              </div>
+            </div>
+            <div class="settings-field">
+              <span class="field-hint">💡 Kali ကနေ Mac ပေါ်ရှိ Ollama ကို ချိတ်ဆက်ရန် Mac ရဲ့ IP ထည့်ပါ (e.g. 192.168.1.100)</span>
+            </div>
+          </div>
+          <button class="test-connection-btn" id="test-ollama-btn">
+            <span>🔍</span> Test Connection
+          </button>
+          <div class="connection-result" id="ollama-result"></div>
+        </div>
+
+        <!-- DeepSeek Config -->
+        <div class="provider-config" id="config-deepseek">
+          <div class="settings-group">
+            <div class="settings-group-title">
+              <span class="group-icon">🔑</span>
+              DeepSeek API
+            </div>
+            <div class="settings-field">
+              <label for="deepseek-key">API Key</label>
+              <div class="api-key-wrapper">
+                <input type="password" id="deepseek-key" placeholder="sk-..." />
+                <button class="api-key-toggle" id="toggle-key-vis" title="Toggle visibility">👁</button>
+              </div>
+              <span class="field-hint">🔗 Get your API key from <strong>platform.deepseek.com</strong></span>
+            </div>
+          </div>
+          <button class="test-connection-btn" id="test-deepseek-btn">
+            <span>🔍</span> Test API Key
+          </button>
+          <div class="connection-result" id="deepseek-result"></div>
+        </div>
+
+      </div>
+
+      <!-- Footer -->
+      <div class="settings-footer">
+        <button class="settings-cancel-btn" id="settings-cancel-btn">Cancel</button>
+        <button class="settings-save-btn" id="settings-save-btn">Save & Apply</button>
+      </div>
+
+    </div>
   </div>
 
   <!-- App scripts — components first, then app logic -->

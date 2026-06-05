@@ -403,6 +403,17 @@ class OllamaClient {
       this._abortController = null;
     }
   }
+
+  /**
+   * Update the base URL for the Ollama server.
+   * @param {string} newBaseUrl - The new base URL (e.g., 'http://192.168.1.100:11434')
+   */
+  updateBaseUrl(newBaseUrl) {
+    const parsed = new URL(newBaseUrl);
+    this.host = parsed.hostname;
+    this.port = parseInt(parsed.port, 10) || 11434;
+    this.protocol = parsed.protocol;
+  }
 }
 
 module.exports = OllamaClient;
