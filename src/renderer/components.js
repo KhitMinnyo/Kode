@@ -1,0 +1,383 @@
+/* ============================================================
+   Kode — AI Agent  |  UI Components
+   All helpers exported to window.KodeComponents
+   ============================================================ */
+
+(() => {
+  'use strict';
+
+  /* ---- Tool icon & color mapping ---- */
+  const TOOL_META = {
+    create_file:     { icon: '📁', css: 'tool-file',      label: 'Create File' },
+    edit_file:       { icon: '✏️', css: 'tool-edit',      label: 'Edit File' },
+    read_file:       { icon: '📄', css: 'tool-read',      label: 'Read File' },
+    run_command:     { icon: '⌨️', css: 'tool-command',   label: 'Run Command' },
+    list_directory:  { icon: '📂', css: 'tool-directory', label: 'List Directory' },
+  };
+
+  /**
+   * Wrap <pre><code> blocks produced by marked with a header
+   * that shows the language label and a copy button.
+   */
+  function wrapCodeBlocks(container) {
+    container.querySelectorAll('pre code').forEach((codeEl) => {
+      const pre = codeEl.parentElement;
+      if (pre.parentElement.classList.contains('code-block-wrapper')) return; // already wrapped
+
+      // Detect language from hljs class (e.g. "language-python")
+      const langClass = [...codeEl.classList].find(c => c.startsWith('language-'));
+      const lang = langClass ? langClass.replace('language-', '') : '';
+
+      const wrapper = document.createElement('div');
+      wrapper.className = 'code-block-wrapper';
+
+      const header = document.createElement('div');
+      header.className = 'code-block-header';
+
+      const langLabel = document.createElement('span');
+      langLabel.className = 'code-lang';
+      langLabel.textContent = lang || 'code';
+
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'code-copy-btn';
+      copyBtn.textContent = 'Copy';
+      copyBtn.addEventListener('click', () => {
+        navigator.clipboard.writeText(codeEl.textContent).then(() => {
+          copyBtn.textContent = 'Copied!';
+          setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
+        });
+      });
+
+      header.append(langLabel, copyBtn);
+      pre.parentNode.insertBefore(wrapper, pre);
+      wrapper.append(header, pre);
+    });
+  }
+
+  /**
+   * Render markdown string → HTML, then apply hljs & code-block wrappers.
+   * Returns an element ready to be inserted into the DOM.
+   */
+  function renderMarkdown(text) {
+    const div = document.createElement('div');
+    div.className = 'markdown-body';
+
+    // Configure marked for safe rendering
+    if (typeof marked !== 'undefined') {
+      marked.setOptions({
+        breaks: true,
+        gfm: true,
+        headerIds: false,
+        mangle: false,
+      });
+      div.innerHTML = marked.parse(text || '');
+    } else {
+      div.textContent = text || '';
+    }
+
+    // Syntax highlighting
+    if (typeof hljs !== 'undefined') {
+      div.querySelectorAll('pre code').forEach((block) => {
+        hljs.highlightElement(block);
+      });
+    }
+
+    wrapCodeBlocks(div);
+    return div;
+  }
+
+  /* ==========================================================
+     Public API
+     ========================================================== */
+
+  /**
+   * createMessageElement(role, content, toolResults?)
+   * role: 'user' | 'assistant' | 'error'
+   */
+  function createMessageElement(role, content, toolResults) {
+    const msg = document.createElement('div');
+    msg.className = `message ${role}`;
+
+    const bubble = document.createElement('div');
+    bubble.className = 'message-bubble';
+
+    // Render markdown for assistant & error; plain text for user
+    if (role === 'user') {
+      bubble.textContent = content;
+    } else {
+      const md = renderMarkdown(content);
+      bubble.appendChild(md);
+    }
+
+    msg.appendChild(bubble);
+
+    // Tool result cards (assistant messages only)
+    if (toolResults && toolResults.length) {
+      toolResults.forEach((tr) => {
+        bubble.appendChild(createToolCard(tr));
+      });
+    }
+
+    return msg;
+  }
+
+  /**
+   * createToolCard({ tool, params, result })
+   */
+  function createToolCard(toolExecution) {
+    const toolName = toolExecution.tool || 'unknown';
+    const meta = TOOL_META[toolName] || { icon: '🔧', css: '', label: toolName };
+
+    const card = document.createElement('div');
+    card.className = `tool-card ${meta.css}`;
+
+    // Header (clickable to toggle)
+    const header = document.createElement('div');
+    header.className = 'tool-card-header';
+
+    const icon = document.createElement('span');
+    icon.className = 'tool-icon';
+    icon.textContent = meta.icon;
+
+    const name = document.createElement('span');
+    name.className = 'tool-name';
+    name.textContent = meta.label;
+
+    const toggle = document.createElement('span');
+    toggle.className = 'tool-toggle';
+    toggle.textContent = '▼';
+
+    header.append(icon, name, toggle);
+
+    // Params
+    const params = document.createElement('div');
+    params.className = 'tool-params';
+    const paramText = toolExecution.params
+      ? (typeof toolExecution.params === 'string'
+          ? toolExecution.params
+          : JSON.stringify(toolExecution.params, null, 2))
+      : '';
+    params.textContent = paramText;
+
+    // Result (collapsible)
+    const result = document.createElement('div');
+    result.className = 'tool-result';
+    const resultText = toolExecution.result
+      ? (typeof toolExecution.result === 'string'
+          ? toolExecution.result
+          : JSON.stringify(toolExecution.result, null, 2))
+      : 'No output';
+    result.textContent = resultText;
+
+    // Toggle expand / collapse
+    header.addEventListener('click', () => {
+      card.classList.toggle('expanded');
+    });
+
+    card.append(header, params, result);
+    return card;
+  }
+
+  /**
+   * createTypingIndicator — three bouncing dots
+   */
+  function createTypingIndicator() {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'typing-indicator';
+    wrapper.id = 'typing-indicator';
+    for (let i = 0; i < 3; i++) {
+      const dot = document.createElement('span');
+      dot.className = 'typing-dot';
+      wrapper.appendChild(dot);
+    }
+    return wrapper;
+  }
+
+  /**
+   * createWelcomeScreen — shown when conversation is empty
+   */
+  function createWelcomeScreen() {
+    const screen = document.createElement('div');
+    screen.className = 'welcome-screen';
+    screen.id = 'welcome-screen';
+
+    const logo = document.createElement('div');
+    logo.className = 'welcome-logo';
+    logo.textContent = 'Kode';
+
+    const subtitle = document.createElement('div');
+    subtitle.className = 'welcome-subtitle';
+    subtitle.textContent = 'Your AI Coding Agent — Powered by Ollama';
+
+    const prompts = document.createElement('div');
+    prompts.className = 'welcome-prompts';
+
+    const examples = [
+      { icon: '📁', text: 'Create a Python project structure' },
+      { icon: '🔍', text: 'Read and analyze a file' },
+      { icon: '⌨️', text: 'Run a shell command' },
+      { icon: '🐛', text: 'Fix errors in my code' },
+    ];
+
+    examples.forEach(({ icon, text }) => {
+      const card = document.createElement('div');
+      card.className = 'prompt-card';
+      card.dataset.prompt = text;
+
+      const iconSpan = document.createElement('span');
+      iconSpan.className = 'prompt-icon';
+      iconSpan.textContent = icon;
+
+      const label = document.createElement('span');
+      label.textContent = text;
+
+      card.append(iconSpan, label);
+      prompts.appendChild(card);
+    });
+
+    screen.append(logo, subtitle, prompts);
+    return screen;
+  }
+
+  /**
+   * createModelOption(model) → <option> element
+   * model: { name, size, modified_at, details }
+   */
+  function createModelOption(model) {
+    const opt = document.createElement('option');
+    opt.value = model.name;
+
+    const sizeStr = formatFileSize(model.size || 0);
+    const paramCount = model.details && model.details.parameter_size
+      ? ` · ${model.details.parameter_size}`
+      : '';
+
+    opt.textContent = `${model.name}  (${sizeStr}${paramCount})`;
+    return opt;
+  }
+
+  /**
+   * formatFileSize(bytes) → "1.2 GB"
+   */
+  function formatFileSize(bytes) {
+    if (!bytes || bytes === 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(1024));
+    const val = (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0);
+    return `${val} ${units[i]}`;
+  }
+
+  /**
+   * createFileTree(treeData) — renders a recursive file tree from data
+   * treeData: [{name, path, type, children?, size?}, ...]
+   */
+  function createFileTree(treeData, onFileClick) {
+    const ul = document.createElement('ul');
+    ul.className = 'file-tree';
+
+    treeData.forEach(item => {
+      const li = document.createElement('li');
+
+      if (item.type === 'directory') {
+        li.className = 'file-tree-dir';
+
+        const itemEl = document.createElement('div');
+        itemEl.className = 'file-tree-item';
+
+        const chevron = document.createElement('span');
+        chevron.className = 'file-tree-chevron';
+        chevron.textContent = '▶';
+
+        const icon = document.createElement('span');
+        icon.className = 'file-tree-icon';
+        icon.textContent = '📁';
+
+        const name = document.createElement('span');
+        name.className = 'file-tree-name';
+        name.textContent = item.name;
+
+        itemEl.append(chevron, icon, name);
+        li.appendChild(itemEl);
+
+        // Click to expand/collapse
+        itemEl.addEventListener('click', (e) => {
+          e.stopPropagation();
+          li.classList.toggle('expanded');
+          // Change folder icon
+          icon.textContent = li.classList.contains('expanded') ? '📂' : '📁';
+        });
+
+        // Render children
+        if (item.children && item.children.length > 0) {
+          const childUl = createFileTree(item.children, onFileClick);
+          childUl.className = '';  // remove 'file-tree' class from nested
+          li.appendChild(childUl);
+        }
+      } else {
+        // File
+        const itemEl = document.createElement('div');
+        itemEl.className = 'file-tree-item';
+
+        const icon = document.createElement('span');
+        icon.className = 'file-tree-icon';
+        icon.textContent = getFileIcon(item.name);
+
+        const name = document.createElement('span');
+        name.className = 'file-tree-name';
+        name.textContent = item.name;
+
+        const size = document.createElement('span');
+        size.className = 'file-tree-size';
+        size.textContent = formatFileSize(item.size || 0);
+
+        itemEl.append(icon, name, size);
+        li.appendChild(itemEl);
+
+        // Click to read file
+        itemEl.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (onFileClick) onFileClick(item.path, item.name);
+        });
+      }
+
+      ul.appendChild(li);
+    });
+
+    return ul;
+  }
+
+  /**
+   * Get an icon for a filename based on its extension
+   */
+  function getFileIcon(filename) {
+    const ext = filename.split('.').pop().toLowerCase();
+    const icons = {
+      js: '📜', ts: '📘', jsx: '⚛️', tsx: '⚛️',
+      py: '🐍', rb: '💎', go: '🔷', rs: '🦀',
+      html: '🌐', css: '🎨', scss: '🎨', less: '🎨',
+      json: '📋', yaml: '📋', yml: '📋', toml: '📋',
+      xml: '📋',
+      md: '📝', txt: '📝', rst: '📝',
+      sh: '⚡', bash: '⚡', zsh: '⚡',
+      png: '🖼️', jpg: '🖼️', jpeg: '🖼️', gif: '🖼️', svg: '🖼️',
+      pdf: '📕', doc: '📕', docx: '📕',
+      zip: '📦', tar: '📦', gz: '📦',
+      env: '🔒', lock: '🔒',
+      sql: '🗄️', db: '🗄️',
+    };
+    return icons[ext] || '📄';
+  }
+
+  /* ---- Expose on window ---- */
+  window.KodeComponents = {
+    createMessageElement,
+    createToolCard,
+    createTypingIndicator,
+    createWelcomeScreen,
+    createModelOption,
+    formatFileSize,
+    renderMarkdown,
+    createFileTree,
+    getFileIcon,
+  };
+})();

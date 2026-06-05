@@ -1,0 +1,63 @@
+{
+  "name": "kode",
+  "version": "1.0.0",
+  "description": "Kode — AI Coding & Cybersecurity Agent powered by Ollama",
+  "repository": "https://github.com/user/kode",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "build": "electron-builder --mac",
+    "build:dmg": "electron-builder --mac dmg",
+    "build:zip": "electron-builder --mac zip"
+  },
+  "author": "Kode",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.kode.agent",
+    "productName": "Kode",
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "icon.png",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "universal"
+          ]
+        }
+      ],
+      "darkModeSupport": true,
+      "hardenedRuntime": false
+    },
+    "dmg": {
+      "title": "Kode",
+      "backgroundColor": "#0f0f23",
+      "contents": [
+        {
+          "x": 130,
+          "y": 220
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    },
+    "files": [
+      "main.js",
+      "icon.png",
+      "src/**/*",
+      "!node_modules/.cache"
+    ],
+    "directories": {
+      "output": "dist"
+    }
+  }
+}

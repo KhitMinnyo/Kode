@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+# Build output
+dist/
+out/
+# Electron binaries
+*.dmg
+*.blockmap
+*.zip
+*.exe
+*.AppImage
+builder-debug.yml
+# macOS
+.DS_Store
+*.swp
+Thumbs.db
+# IDE
+.vscode/
+.idea/
+*.sublime-*
+# Logs
+*.log
+npm-debug.log*
+# Environment
+.env
+.env.local
+# App data (user-specific)
+kode-chats.json
+kode-projects.json

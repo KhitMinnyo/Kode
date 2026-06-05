@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self';
+               script-src 'self' https://cdnjs.cloudflare.com;
+               style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com;
+               font-src https://fonts.gstatic.com;
+               connect-src *;" />
+  <title>Kode — AI Agent</title>
+
+  <!-- Google Fonts — Inter -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+
+  <!-- Highlight.js — syntax highlighting -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+
+  <!-- Marked — markdown parser -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.0/marked.min.js"></script>
+
+  <!-- App styles -->
+  <link rel="stylesheet" href="styles.css" />
+</head>
+
+<body>
+  <div class="app-container">
+
+    <!-- ======================== Sidebar ======================== -->
+    <aside class="sidebar">
+
+      <!-- Logo / Branding -->
+      <div class="sidebar-header">
+        <div class="logo">
+          <img class="logo-icon" src="icon.png" alt="Kode" />
+          <div class="logo-text">
+            <h1>Kode</h1>
+            <span>AI Agent</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Model Selector -->
+      <div class="model-selector">
+        <label for="model-select">Model</label>
+        <select id="model-select">
+          <option disabled selected>Loading models…</option>
+        </select>
+      </div>
+
+      <!-- Projects -->
+      <div class="project-section">
+        <div class="project-section-header">
+          <label>Projects</label>
+          <button class="add-project-btn" id="open-folder-btn" title="Add project folder">＋</button>
+        </div>
+        <div class="projects-list" id="projects-list">
+          <!-- Project items rendered by JS -->
+          <div class="projects-empty" id="projects-empty">
+            <span>No projects opened</span>
+            <span class="projects-empty-hint">Click ＋ to add a folder</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Chat History -->
+      <div class="chat-section">
+        <div class="chat-section-header">
+          <label>Chats</label>
+        </div>
+        <div class="chat-list-container" id="chat-list-container">
+          <!-- Chat items rendered by JS -->
+        </div>
+      </div>
+
+      <!-- New Chat -->
+      <div class="sidebar-bottom">
+        <button class="sidebar-btn new-chat-btn" id="new-chat-btn">
+          <span class="btn-icon">＋</span>
+          <span>New Chat</span>
+        </button>
+      </div>
+
+      <!-- Connection Status -->
+      <div class="connection-status">
+        <span class="status-dot" id="status-dot"></span>
+        <span id="status-label">Checking…</span>
+      </div>
+
+    </aside>
+
+    <!-- =================== Main Content ==================== -->
+    <main class="main-content">
+
+      <!-- Chat Header (draggable title-bar region) -->
+      <header class="chat-header">
+        <span class="chat-header-title" id="chat-title">No model selected</span>
+        <div class="agent-status-bar" id="agent-status-bar">
+          <div class="status-indicator" id="status-indicator"></div>
+          <span class="status-text" id="status-text"></span>
+          <span class="elapsed-timer" id="elapsed-timer"></span>
+          <span class="token-counter" id="token-counter"></span>
+        </div>
+      </header>
+
+      <!-- Messages -->
+      <div class="messages-container" id="messages-container">
+        <!-- Messages & welcome screen rendered by JS -->
+      </div>
+
+      <!-- Input Area -->
+      <div class="input-area">
+        <div class="input-wrapper">
+          <textarea
+            id="message-input"
+            rows="1"
+            placeholder="Send a message…"
+            autocomplete="off"
+            spellcheck="true"
+          ></textarea>
+          <button class="send-btn" id="send-btn" title="Send message">▶</button>
+          <button class="stop-btn" id="stop-btn" title="Stop generation">■</button>
+        </div>
+      </div>
+
+    </main>
+  </div>
+
+  <!-- App scripts — components first, then app logic -->
+  <script src="components.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
