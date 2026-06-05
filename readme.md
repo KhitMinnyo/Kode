@@ -18,7 +18,7 @@
 - **Automated pentest workflow** — Give a target, agent scans and analyzes autonomously
 - **macOS + Kali VM** — Runs tools on macOS directly, guides Kali VM commands
 - **WAF/CDN bypass** — Cloudflare origin IP discovery, WAF evasion techniques
-- **Web security specialist** — PortSwigger Web Academy knowledge, bug bounty methodology
+- **Web security specialist** — Knowledge, bug bounty methodology
 - **Result analysis** — Paste nmap/nikto/sqlmap output → auto-analyzed with next steps
 - **Professional reports** — Pentest report format with severity, CVSS, remediation
 
