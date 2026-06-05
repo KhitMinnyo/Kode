@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const { execSync, spawn } = require('child_process');
 
 const MAX_FILE_READ_SIZE = 50 * 1024; // 50KB
 const COMMAND_TIMEOUT = 30000; // 30 seconds
@@ -175,27 +175,64 @@ async function run_command(params, projectFolder) {
 
   try {
     if (isServerCommand) {
-      // For server commands, run briefly and report — don't wait forever
+      // Run server as a detached background process
       try {
-        execSync(command, {
-          timeout: 5000,  // 5s — just to see if it starts
-          encoding: 'utf-8',
-          shell: '/bin/zsh',
+        const shell = process.platform === 'darwin' ? '/bin/zsh' : '/bin/bash';
+        const child = spawn(shell, ['-c', command], {
           cwd: projectFolder || process.cwd(),
-          maxBuffer: 1024 * 1024,
-          stdio: ['pipe', 'pipe', 'pipe'],
+          detached: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
         });
-      } catch (e) {
-        if (e.killed) {
-          // Timeout = server started successfully (it's running)
-          const portMatch = command.match(/port[=\s]+(\d+)/i) || command.match(/:(\d{4,5})/);
-          const port = portMatch ? portMatch[1] : '5001';
-          return `✅ Server starting: ${command}\n🌐 Access at: http://localhost:${port}\n\n⚠️ Note: The server is running in the background. Use Ctrl+C in terminal to stop it.`;
+
+        // Collect early output (first 3 seconds) to detect startup errors
+        let earlyStdout = '';
+        let earlyStderr = '';
+        child.stdout.on('data', (data) => { earlyStdout += data.toString(); });
+        child.stderr.on('data', (data) => { earlyStderr += data.toString(); });
+
+        // Wait 3 seconds to see if it crashes immediately
+        const startResult = await new Promise((resolve) => {
+          let exited = false;
+
+          child.on('exit', (code) => {
+            exited = true;
+            if (code !== 0) {
+              resolve({ ok: false, error: earlyStderr || earlyStdout || `Exit code: ${code}` });
+            }
+          });
+
+          setTimeout(() => {
+            if (!exited) {
+              // Still running after 3s = server started successfully
+              child.stdout.removeAllListeners('data');
+              child.stderr.removeAllListeners('data');
+              child.unref(); // Detach from parent process
+              resolve({ ok: true, pid: child.pid });
+            }
+          }, 3000);
+        });
+
+        if (!startResult.ok) {
+          return `❌ Server failed to start:\n$ ${command}\n${startResult.error}`;
         }
-        const stderr = (e.stderr || '').trim();
-        return `❌ Server failed to start:\n$ ${command}\n${stderr}`;
+
+        // Try to detect port from command or early output
+        const portMatch = command.match(/port[=\s]+(\d+)/i) ||
+                          command.match(/:(\d{4,5})/) ||
+                          earlyStdout.match(/port\s+(\d+)/i) ||
+                          earlyStdout.match(/:(\d{4,5})/) ||
+                          earlyStderr.match(/port\s+(\d+)/i) ||
+                          earlyStderr.match(/:(\d{4,5})/);
+        const port = portMatch ? portMatch[1] : '5001';
+
+        let result = `✅ Server started (PID: ${startResult.pid}):\n$ ${command}\n🌐 Access at: http://localhost:${port}`;
+        if (earlyStdout.trim()) {
+          result += `\n\nOutput:\n${earlyStdout.trim().substring(0, 500)}`;
+        }
+        return result;
+      } catch (err) {
+        return `❌ Failed to start server: ${err.message}`;
       }
-      return `✅ Server command executed: ${command}`;
     }
 
     const stdout = execSync(command, {
@@ -211,8 +248,8 @@ async function run_command(params, projectFolder) {
     if (output.length === 0) {
       return `✅ Command executed successfully (no output):\n$ ${command}`;
     }
-    // Truncate very long output
-    const maxLen = 3000;
+    // Truncate very long output (5KB for scan results)
+    const maxLen = 5000;
     const truncated = output.length > maxLen ? output.substring(0, maxLen) + '\n\n... (output truncated)' : output;
     return `✅ Command output:\n$ ${command}\n\n${truncated}`;
   } catch (err) {
