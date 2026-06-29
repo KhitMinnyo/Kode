@@ -77,6 +77,7 @@ function tryParseToolJSON(jsonStr) {
     const pathMatch = jsonStr.match(/"path"\s*:\s*"([^"]*?)"/);
     const contentMatch = jsonStr.match(/"content"\s*:\s*"([\s\S]*?)"\s*\n?\s*\}/);
     const commandMatch = jsonStr.match(/"command"\s*:\s*"([^"]*?)"/);
+    const urlMatch = jsonStr.match(/"url"\s*:\s*"([^"]*?)"/);
     const oldContentMatch = jsonStr.match(/"old_content"\s*:\s*"([\s\S]*?)"/);
     const newContentMatch = jsonStr.match(/"new_content"\s*:\s*"([\s\S]*?)"\s*\n?\s*\}/);
 

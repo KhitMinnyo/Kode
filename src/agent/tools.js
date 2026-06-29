@@ -38,6 +38,44 @@ async function create_file(params, projectFolder) {
   }
 }
 
+// Adding firecrawl 
+
+async function firecrawl_scrape(args) {
+    const url = args.url || args; 
+    console.log(`[+] Agent is scraping via Firecrawl: ${url}`);
+    
+    try {
+        const response = await fetch("https://api.firecrawl.dev/v2/scrape", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                url: url,
+                formats: ["markdown"]
+                //  for extra functions
+            })
+        });
+
+        const result = await response.json();
+        
+        if (result.success && result.data && result.data.markdown) {
+            // Send Markdown result to agent
+            return `Scraped Content (Markdown) from ${url}:\n\n${result.data.markdown}`;
+        } else {
+            return `Error: Failed to scrape ${url}. Firecrawl response: ${JSON.stringify(result)}`;
+        }
+    } catch (error) {
+        return `Error executing firecrawl_scrape: ${error.message}`;
+    }
+}
+
+// Module export 
+module.exports = {
+    // Other tools can be added
+    firecrawl_scrape
+};
+
 /**
  * Tool: edit_file
  * Edits an existing file by performing a find-and-replace operation.
