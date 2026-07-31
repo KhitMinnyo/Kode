@@ -101,6 +101,10 @@
           <span class="btn-icon">🧠</span>
           <span>Memory</span>
         </button>
+        <button class="settings-btn" id="processes-btn">
+          <span class="btn-icon">📟</span>
+          <span>Processes</span>
+        </button>
         <button class="settings-btn" id="settings-btn">
           <span class="btn-icon">⚙️</span>
           <span>Settings</span>
@@ -335,6 +339,30 @@
       <div class="settings-footer">
         <button class="settings-cancel-btn" id="memory-refresh-btn">↻ Refresh</button>
         <button class="settings-save-btn" id="memory-close-btn-2">Close</button>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ====================== Processes Modal ====================== -->
+  <div class="settings-overlay" id="processes-overlay">
+    <div class="settings-modal">
+
+      <div class="settings-header">
+        <h2>📟 Background Processes</h2>
+        <button class="settings-close-btn" id="processes-close-btn">✕</button>
+      </div>
+
+      <div class="settings-body">
+        <div class="settings-group">
+          <span class="field-hint">💡 Servers started via run_command (e.g. "npm start", "flask run") keep running here after the tool call returns. Click a process to view its live log.</span>
+        </div>
+        <div id="processes-list" class="process-list"></div>
+      </div>
+
+      <div class="settings-footer">
+        <button class="settings-cancel-btn" id="processes-refresh-btn">↻ Refresh</button>
+        <button class="settings-save-btn" id="processes-close-btn-2">Close</button>
       </div>
 
     </div>

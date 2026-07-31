@@ -102,6 +102,33 @@ test('run_command rejects a missing command parameter', async () => {
   assert.match(result, /command.*required/i);
 });
 
+test('run_command registers detected server commands with processManager and keeps capturing their output', async (t) => {
+  // Regression test for the gap where a detached server's stdout/stderr were torn
+  // down and lost after the 3s startup check — this asserts the process shows up
+  // in processManager (so the UI's Processes panel can see it) and that output
+  // printed after startup keeps landing in its log buffer instead of vanishing.
+  const processManager = require('../src/agent/processManager');
+
+  // Matches the isServerCommand `/node\s+.*server/i` pattern; keeps running past the
+  // 3s startup-detection window instead of exiting immediately.
+  const command = 'node -e "console.log(\'mock server listening on port 4321\'); setInterval(() => {}, 1000)"';
+  const result = await tools.run_command({ command });
+
+  assert.match(result, /✅ Server started/);
+  assert.match(result, /Processes panel/);
+
+  const pidMatch = result.match(/PID:\s*(\d+)/);
+  assert.ok(pidMatch, 'expected the result to report a PID');
+  const pid = parseInt(pidMatch[1], 10);
+
+  t.after(() => processManager.stop(pid)); // avoid leaking a live node process after the test run
+
+  const tracked = processManager.list().find((p) => p.pid === pid);
+  assert.ok(tracked, 'expected the server to be registered in processManager');
+  assert.equal(tracked.status, 'running');
+  assert.match(processManager.getLog(pid), /mock server listening on port 4321/);
+});
+
 test('firecrawl_scrape fails clearly without an API key configured', async () => {
   const original = process.env.FIRECRAWL_API_KEY;
   delete process.env.FIRECRAWL_API_KEY;

@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { execSync, spawn } = require('child_process');
 const memory = require('./memory');
+const processManager = require('./processManager');
 
 const MAX_FILE_READ_SIZE = 50 * 1024; // 50KB
 const COMMAND_TIMEOUT = 30000; // 30 seconds
@@ -369,10 +370,12 @@ async function run_command(params, projectFolder) {
 
           setTimeout(() => {
             if (!exited) {
-              // Still running after 3s = server started successfully
-              child.stdout.removeAllListeners('data');
-              child.stderr.removeAllListeners('data');
-              child.unref(); // Detach from parent process
+              // Still running after 3s = server started successfully. Previously the
+              // stdout/stderr listeners were torn down and the child fully detached
+              // here, which meant any output printed after this point (request logs,
+              // later crashes) was silently lost with no way to see it from the UI.
+              // Instead, keep piping output into processManager's rolling log buffer
+              // so a "Processes" panel can show live logs and let the user stop it.
               resolve({ ok: true, pid: child.pid });
             }
           }, 3000);
@@ -391,7 +394,23 @@ async function run_command(params, projectFolder) {
                           earlyStderr.match(/:(\d{4,5})/);
         const port = portMatch ? portMatch[1] : '5001';
 
-        let result = `✅ Server started (PID: ${startResult.pid}):\n$ ${command}\n🌐 Access at: http://localhost:${port}`;
+        processManager.register({
+          pid: startResult.pid,
+          command,
+          cwd: projectFolder || process.cwd(),
+          port,
+          child,
+        });
+        // Seed the buffer with whatever was captured during the 3s startup window,
+        // then keep appending as more output arrives for the life of the process.
+        if (earlyStdout) processManager.appendLog(startResult.pid, earlyStdout);
+        if (earlyStderr) processManager.appendLog(startResult.pid, earlyStderr);
+        child.stdout.on('data', (data) => processManager.appendLog(startResult.pid, data.toString()));
+        child.stderr.on('data', (data) => processManager.appendLog(startResult.pid, data.toString()));
+        child.on('exit', (code) => processManager.markExited(startResult.pid, code));
+        child.unref(); // Detach from Kode's own lifecycle — server survives even if Kode's main process exits
+
+        let result = `✅ Server started (PID: ${startResult.pid}):\n$ ${command}\n🌐 Access at: http://localhost:${port}\n📋 View live logs in the Processes panel.`;
         if (earlyStdout.trim()) {
           result += `\n\nOutput:\n${earlyStdout.trim().substring(0, 500)}`;
         }

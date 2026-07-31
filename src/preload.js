@@ -176,4 +176,38 @@ contextBridge.exposeInMainWorld('kode', {
    * @returns {Promise<{success: boolean, error?: string}>}
    */
   deleteMemoryEntry: (key) => ipcRenderer.invoke('delete-memory', key),
+
+  // ─── Background Process APIs ─────────────────────────────────────────────
+  // Servers started by run_command (e.g. "npm start", "flask run") keep running
+  // in the background. These APIs let the UI show their live logs and stop them.
+
+  /** List background processes started via run_command, running or recently exited. */
+  listProcesses: () => ipcRenderer.invoke('list-processes'),
+
+  /** Get the full buffered log for a background process by PID. */
+  getProcessLog: (pid) => ipcRenderer.invoke('get-process-log', pid),
+
+  /** Stop a running background process by PID. */
+  stopProcess: (pid) => ipcRenderer.invoke('stop-process', pid),
+
+  /** Register a callback for new log chunks from a background process. */
+  onProcessLog: (callback) => {
+    const handler = (_event, data) => callback(data);
+    ipcRenderer.on('process-log', handler);
+    return () => ipcRenderer.removeListener('process-log', handler);
+  },
+
+  /** Register a callback for when a background process exits. */
+  onProcessExit: (callback) => {
+    const handler = (_event, data) => callback(data);
+    ipcRenderer.on('process-exit', handler);
+    return () => ipcRenderer.removeListener('process-exit', handler);
+  },
+
+  /** Register a callback for when a new background process starts. */
+  onProcessStart: (callback) => {
+    const handler = (_event, data) => callback(data);
+    ipcRenderer.on('process-start', handler);
+    return () => ipcRenderer.removeListener('process-start', handler);
+  },
 });

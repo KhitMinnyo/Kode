@@ -1761,6 +1761,110 @@ html, body {
   background: rgba(248, 113, 113, 0.08);
 }
 
+.process-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+.process-empty-state {
+  padding: 24px 16px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.process-entry {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.process-entry-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  cursor: pointer;
+}
+
+.process-entry-command {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.process-entry-meta {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.process-status-badge {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.process-status-running {
+  color: #4ade80;
+  background: rgba(74, 222, 128, 0.12);
+}
+
+.process-status-exited,
+.process-status-stopped {
+  color: var(--text-muted);
+  background: rgba(148, 163, 184, 0.12);
+}
+
+.process-entry-stop-btn {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  padding: 4px 10px;
+  cursor: pointer;
+  font-size: 11px;
+  transition: all 0.2s ease;
+}
+
+.process-entry-stop-btn:hover {
+  color: #f87171;
+  border-color: #f87171;
+  background: rgba(248, 113, 113, 0.08);
+}
+
+.process-entry-log {
+  display: none;
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 10px 14px;
+  background: var(--bg-primary);
+  border-top: 1px solid var(--border-glass);
+  font-family: var(--font-mono, monospace);
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-secondary);
+}
+
+.process-entry.expanded .process-entry-log {
+  display: block;
+}
+
 .settings-field input {
   width: 100%;
   padding: 10px 14px;

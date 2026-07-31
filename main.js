@@ -10,6 +10,7 @@ const OpenAIClient = require('./src/openai/client');
 const AnthropicClient = require('./src/anthropic/client');
 const AgentCore = require('./src/agent/core');
 const memoryStore = require('./src/agent/memory');
+const processManager = require('./src/agent/processManager');
 
 // ─── Globals ─────────────────────────────────────────────────────────────────
 
@@ -261,6 +262,50 @@ function createMainWindow() {
 // ─── IPC Handlers ────────────────────────────────────────────────────────────
 
 function registerIPCHandlers() {
+  /**
+   * Background/server process visibility (see src/agent/processManager.js). Forward
+   * live log chunks and exit events to the renderer so a "Processes" panel can show
+   * a running dev server's output in real time instead of it vanishing once the
+   * run_command tool call returns.
+   */
+  processManager.on('log', ({ pid, chunk }) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('process-log', { pid, chunk });
+    }
+  });
+  processManager.on('exit', ({ pid, code }) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('process-exit', { pid, code });
+    }
+  });
+  processManager.on('start', (entry) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('process-start', entry);
+    }
+  });
+
+  /**
+   * List background processes (servers) started via run_command, running or recently exited.
+   */
+  ipcMain.handle('list-processes', async () => {
+    return { success: true, processes: processManager.list() };
+  });
+
+  /**
+   * Get the full buffered log for a background process by PID.
+   */
+  ipcMain.handle('get-process-log', async (event, pid) => {
+    return { success: true, log: processManager.getLog(pid) };
+  });
+
+  /**
+   * Stop a running background process (and its process group) by PID.
+   */
+  ipcMain.handle('stop-process', async (event, pid) => {
+    const ok = processManager.stop(pid);
+    return { success: ok };
+  });
+
   /**
    * List available Ollama models
    */

@@ -113,6 +113,7 @@
     setupStreamListeners();
     setupSettingsListeners();
     setupMemoryListeners();
+    setupProcessesListeners();
     await checkConnection();
     await loadModels();
     await loadProjectFolder();
@@ -1218,6 +1219,176 @@
       });
       item.appendChild(deleteBtn);
 
+      listEl.appendChild(item);
+    }
+  }
+
+  /* ==========================================================
+     Processes Modal (background servers started via run_command)
+     ========================================================== */
+  // run_command detaches server-type commands (npm start, flask run, ...) so they
+  // keep running after the tool call returns; processManager on the main-process
+  // side buffers their stdout/stderr so this panel can show it live. Track which
+  // process's log is currently expanded so incoming 'process-log' events know
+  // whether to append directly to the DOM.
+  let expandedProcessPid = null;
+
+  function setupProcessesListeners() {
+    const btn = document.getElementById('processes-btn');
+    const overlay = document.getElementById('processes-overlay');
+    const closeBtn = document.getElementById('processes-close-btn');
+    const closeBtn2 = document.getElementById('processes-close-btn-2');
+    const refreshBtn = document.getElementById('processes-refresh-btn');
+
+    if (btn) btn.addEventListener('click', openProcessesPanel);
+    if (closeBtn) closeBtn.addEventListener('click', closeProcessesPanel);
+    if (closeBtn2) closeBtn2.addEventListener('click', closeProcessesPanel);
+    if (refreshBtn) refreshBtn.addEventListener('click', openProcessesPanel);
+
+    if (overlay) {
+      overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) closeProcessesPanel();
+      });
+    }
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && overlay && overlay.classList.contains('active')) {
+        closeProcessesPanel();
+      }
+    });
+
+    // Live log streaming — only touch the DOM for the entry currently expanded,
+    // and only while the panel is open.
+    if (window.kode.onProcessLog) {
+      window.kode.onProcessLog(({ pid, chunk }) => {
+        if (pid !== expandedProcessPid) return;
+        const overlayEl = document.getElementById('processes-overlay');
+        if (!overlayEl || !overlayEl.classList.contains('active')) return;
+        const logEl = document.querySelector(`.process-entry[data-pid="${pid}"] .process-entry-log`);
+        if (logEl) {
+          logEl.textContent += chunk;
+          logEl.scrollTop = logEl.scrollHeight;
+        }
+      });
+    }
+
+    // Start/exit change a process's status badge — cheap enough to just re-render
+    // the whole (small) list when the panel is open.
+    const refreshIfOpen = () => {
+      const overlayEl = document.getElementById('processes-overlay');
+      if (overlayEl && overlayEl.classList.contains('active')) openProcessesPanel();
+    };
+    if (window.kode.onProcessExit) window.kode.onProcessExit(refreshIfOpen);
+    if (window.kode.onProcessStart) window.kode.onProcessStart(refreshIfOpen);
+  }
+
+  function closeProcessesPanel() {
+    const overlay = document.getElementById('processes-overlay');
+    if (overlay) overlay.classList.remove('active');
+  }
+
+  async function openProcessesPanel() {
+    const overlay = document.getElementById('processes-overlay');
+    if (!overlay) return;
+    overlay.classList.add('active');
+
+    const listEl = document.getElementById('processes-list');
+    if (!listEl) return;
+    listEl.textContent = '';
+
+    let result;
+    try {
+      result = await window.kode.listProcesses();
+    } catch (err) {
+      renderProcessEmptyState(listEl, `❌ Failed to load processes: ${err.message}`);
+      return;
+    }
+
+    if (!result || !result.success) {
+      renderProcessEmptyState(listEl, `❌ ${result?.error || 'Failed to load processes.'}`);
+      return;
+    }
+
+    renderProcessList(listEl, result.processes || []);
+  }
+
+  function renderProcessEmptyState(listEl, message) {
+    const div = document.createElement('div');
+    div.className = 'process-empty-state';
+    div.textContent = message;
+    listEl.appendChild(div);
+  }
+
+  function renderProcessList(listEl, processes) {
+    if (!processes || processes.length === 0) {
+      renderProcessEmptyState(listEl, '📟 No background servers yet. When the agent runs something like "npm start" or "flask run", it will show up here.');
+      return;
+    }
+
+    for (const proc of processes) {
+      const item = document.createElement('div');
+      item.className = 'process-entry';
+      item.dataset.pid = String(proc.pid);
+      if (proc.pid === expandedProcessPid) item.classList.add('expanded');
+
+      const header = document.createElement('div');
+      header.className = 'process-entry-header';
+
+      const cmd = document.createElement('div');
+      cmd.className = 'process-entry-command';
+      cmd.textContent = `$ ${proc.command}`;
+      cmd.title = proc.command;
+      header.appendChild(cmd);
+
+      const meta = document.createElement('div');
+      meta.className = 'process-entry-meta';
+      const metaParts = [];
+      if (proc.port) metaParts.push(`:${proc.port}`);
+      metaParts.push(`PID ${proc.pid}`);
+      metaParts.push(formatTimeAgo(proc.startedAt));
+      meta.textContent = metaParts.join(' · ');
+      header.appendChild(meta);
+
+      const badge = document.createElement('span');
+      badge.className = `process-status-badge process-status-${proc.status}`;
+      badge.textContent = proc.status;
+      header.appendChild(badge);
+
+      const stopBtn = document.createElement('button');
+      stopBtn.className = 'process-entry-stop-btn';
+      stopBtn.textContent = '⏹ Stop';
+      stopBtn.disabled = proc.status !== 'running';
+      stopBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        stopBtn.disabled = true;
+        try {
+          await window.kode.stopProcess(proc.pid);
+        } catch (err) {
+          console.error('Failed to stop process:', err);
+        }
+        openProcessesPanel();
+      });
+      header.appendChild(stopBtn);
+
+      const logEl = document.createElement('div');
+      logEl.className = 'process-entry-log';
+
+      header.addEventListener('click', async () => {
+        const isExpanded = item.classList.toggle('expanded');
+        expandedProcessPid = isExpanded ? proc.pid : null;
+        if (isExpanded) {
+          logEl.textContent = 'Loading…';
+          try {
+            const logResult = await window.kode.getProcessLog(proc.pid);
+            logEl.textContent = (logResult && logResult.log) ? logResult.log : '(no output yet)';
+            logEl.scrollTop = logEl.scrollHeight;
+          } catch (err) {
+            logEl.textContent = `Failed to load log: ${err.message}`;
+          }
+        }
+      });
+
+      item.append(header, logEl);
       listEl.appendChild(item);
     }
   }
