@@ -8,33 +8,39 @@
        through main.js via IPC (see preload.js), which runs outside the renderer and
        isn't subject to this CSP at all. A wildcard here would only help an attacker
        who'd already gotten script execution (e.g. via unsanitized content) exfiltrate
-       data — it isn't needed for any legitimate feature. -->
+       data — it isn't needed for any legitimate feature.
+
+       script-src/style-src no longer need cdnjs.cloudflare.com: highlight.js, marked,
+       and DOMPurify are vendored locally under vendor/ (see below) so the app doesn't
+       depend on internet access just to render a chat message — important since Kode's
+       whole point is working with local Ollama models offline. Only the Inter font
+       (cosmetic, not functional) still comes from Google Fonts. -->
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self';
-               script-src 'self' https://cdnjs.cloudflare.com;
-               style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com;
+               script-src 'self';
+               style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
                font-src https://fonts.gstatic.com;
                img-src 'self' data:;
                connect-src 'self';" />
   <title>Kode — AI Agent</title>
 
-  <!-- Google Fonts — Inter -->
+  <!-- Google Fonts — Inter (cosmetic only; everything functional is vendored locally) -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
 
-  <!-- Highlight.js — syntax highlighting -->
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <!-- Highlight.js — syntax highlighting (vendored locally, see vendor/README.md) -->
+  <link rel="stylesheet" href="vendor/github-dark.min.css" />
+  <script src="vendor/highlight.min.js"></script>
 
-  <!-- Marked — markdown parser -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.0/marked.min.js"></script>
+  <!-- Marked — markdown parser (vendored locally) -->
+  <script src="vendor/marked.min.js"></script>
 
   <!-- DOMPurify — sanitizes marked's HTML output before it's ever inserted into the DOM.
        Necessary because assistant messages can contain content pulled from the web
        (firecrawl_scrape, web_search) or from files in the project — none of that is
-       trustworthy input, and marked.parse() alone does not sanitize. -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
+       trustworthy input, and marked.parse() alone does not sanitize. (vendored locally) -->
+  <script src="vendor/purify.min.js"></script>
 
   <!-- App styles -->
   <link rel="stylesheet" href="styles.css" />

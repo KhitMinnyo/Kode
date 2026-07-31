@@ -42,3 +42,8 @@ kode-settings.json
 .kode/
 # Test coverage output
 coverage/
+# Vendored third-party UI libraries (highlight.js, marked, DOMPurify) — exact,
+# unmodified upstream builds fetched via src/renderer/vendor/fetch-vendor-libs.sh,
+# same reasoning as not committing node_modules. Keep the folder's own README/script.
+src/renderer/vendor/*.js
+src/renderer/vendor/*.css

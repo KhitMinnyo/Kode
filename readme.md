@@ -63,6 +63,10 @@
 cd kode
 npm install
 
+# Fetch vendored UI libraries (highlight.js, marked, DOMPurify) — one-time, so the
+# app works fully offline instead of loading these from a CDN. See src/renderer/vendor/README.md
+bash src/renderer/vendor/fetch-vendor-libs.sh
+
 # Start in development mode
 npm start
 ```
