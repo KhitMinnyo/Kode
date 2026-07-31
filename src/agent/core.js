@@ -1,9 +1,32 @@
 'use strict';
 
-const { getSystemPrompt, getAvailableToolNames } = require('./prompts');
+const { getSystemPrompt, getAvailableToolNames, supportsNativeToolCalling } = require('./prompts');
 const tools = require('./tools');
+const { TOOL_SCHEMAS } = tools;
 
 const MAX_TOOL_ITERATIONS = 15;  // Allow multi-step task execution
+
+// Buckets for the num_ctx we actually request from Ollama. Rather than always asking
+// for the model's full (capped) context window — which forces Ollama to allocate a
+// KV cache sized for the worst case on every single request — we size num_ctx to the
+// smallest bucket that comfortably fits the current conversation. This meaningfully
+// reduces memory allocation and speeds up prompt processing for short exchanges on
+// local hardware, at the cost of a (rare) context resize if a conversation suddenly
+// grows a lot within one exchange — which _buildContextMessages already guards
+// against by trimming to budget first.
+const NUM_CTX_BUCKETS = [2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144];
+
+/**
+ * Pick the smallest num_ctx bucket that fits `neededTokens` (with headroom),
+ * capped at `maxContext` (the model's own — possibly capped — context size).
+ */
+function bucketNumCtx(neededTokens, maxContext) {
+  for (const bucket of NUM_CTX_BUCKETS) {
+    if (bucket >= maxContext) return maxContext;
+    if (neededTokens <= bucket) return bucket;
+  }
+  return maxContext;
+}
 
 /**
  * Rough token estimator — ~3.5 chars per token for English/code.
@@ -104,6 +127,33 @@ function tryParseToolJSON(jsonStr) {
 }
 
 /**
+ * Converts Ollama's native tool_calls format into the internal {tool, params} shape
+ * used by the execution loop. `arguments` may come back as a parsed object or as a
+ * raw JSON string depending on the model/Ollama version, so we handle both.
+ */
+function convertNativeToolCalls(nativeToolCalls) {
+  const converted = [];
+  for (const call of nativeToolCalls) {
+    const fn = call.function || call;
+    if (!fn || !fn.name) continue;
+
+    let params = fn.arguments;
+    if (typeof params === 'string') {
+      try {
+        params = JSON.parse(params);
+      } catch {
+        console.warn(`[AgentCore] Failed to parse native tool_call arguments for "${fn.name}":`, params);
+        params = {};
+      }
+    }
+    if (!params || typeof params !== 'object') params = {};
+
+    converted.push({ tool: fn.name, params });
+  }
+  return converted;
+}
+
+/**
  * Strips tool call blocks from the response text to get the "plain" assistant message.
  */
 function stripToolBlocks(responseText) {
@@ -114,29 +164,99 @@ class AgentCore {
   /**
    * @param {import('../ollama/client')} ollamaClient
    */
-  constructor(ollamaClient) {
+  constructor(ollamaClient, maxContextCap = 16384) {
     if (!ollamaClient) {
       throw new Error('OllamaClient instance is required');
     }
     this.ollamaClient = ollamaClient;
     this._isGenerating = false;
     this._contextSizeCache = {};  // model → context_size cache
+    this.maxContextCap = maxContextCap; // user-configurable ceiling, see setMaxContextCap()
+    this._contextSummaryCache = {};  // conversation fingerprint → { droppedCount, summary }
   }
 
   /**
-   * Get the model's context window size (cached after first lookup).
-   * Caps at 8192 to prevent massive KV cache allocation on local machines.
+   * Update the user-configurable context-size ceiling (from Settings). Clears the
+   * per-model cache so the new cap takes effect on the next request rather than
+   * being masked by a previously-cached (smaller or larger) value.
+   */
+  setMaxContextCap(maxContextCap) {
+    const parsed = parseInt(maxContextCap, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) return;
+    this.maxContextCap = parsed;
+    this._contextSizeCache = {};
+    console.log(`[AgentCore] Max context cap set to ${this.maxContextCap}`);
+  }
+
+  /**
+   * Get the model's maximum context window size (cached after first lookup), capped at
+   * `this.maxContextCap` (default 16384, user-configurable in Settings — raise it for
+   * large-context local models like Qwen3.6's 256K window, provided your hardware has the
+   * RAM/VRAM for it). This is the ceiling used for history-budgeting (_buildContextMessages)
+   * — the actual num_ctx sent to Ollama per-request is chosen separately by bucketNumCtx()
+   * based on how many tokens are really needed, so most requests use far less than this ceiling.
    */
   async _getContextSize(model) {
     if (this._contextSizeCache[model]) {
       return this._contextSizeCache[model];
     }
     const rawSize = await this.ollamaClient.getContextSize(model);
-    // Cap at 16384 — balance between context space and performance
-    const size = Math.min(rawSize, 16384);
+    const size = Math.min(rawSize, this.maxContextCap);
     this._contextSizeCache[model] = size;
     console.log(`[AgentCore] Model "${model}" context: ${rawSize} (capped to ${size})`);
     return size;
+  }
+
+  /**
+   * A cheap, stable-enough fingerprint for "which conversation is this" — used to key
+   * the rolling summary cache. main.js reconstructs a fresh conversationHistory array
+   * on every IPC call even for the same ongoing chat, so we can't key by array identity;
+   * the first message's content is stable for the lifetime of a chat, so it's a good
+   * enough proxy without threading a real chatId through the IPC layer.
+   */
+  _conversationFingerprint(model, conversationHistory) {
+    const first = conversationHistory[0];
+    const anchor = first && typeof first.content === 'string' ? first.content.slice(0, 100) : '';
+    return `${model}::${anchor}`;
+  }
+
+  /**
+   * Ask the model to fold newly-dropped history into (or replace) the running summary.
+   * Bounded and time-limited (20s) since this runs inline in the agent loop before the
+   * "real" turn even starts — if it's slow or the model ignores the instruction, we abort
+   * and fall back to the cheap tool-name-list note instead of stalling the whole request.
+   * @returns {Promise<string|null>} - the updated summary, or null on failure/timeout
+   */
+  async _summarizeDroppedHistory(model, previousSummary, newlyDroppedText) {
+    const prompt = `You are compressing an ongoing coding/security-agent session log so it fits in a smaller context window.
+Merge the previous summary with the new content below into ONE updated summary, under 120 words, plain prose (no lists).
+Preserve: the user's goal, files created/edited, commands run and their outcomes, and any unresolved next steps. Drop anything not needed to continue the task.
+
+Previous summary: ${previousSummary || '(none yet)'}
+
+New content to fold in:
+${newlyDroppedText}`;
+
+    const SUMMARY_TIMEOUT_MS = 20000;
+    let timedOut = false;
+
+    const timeoutPromise = new Promise((resolve) => {
+      setTimeout(() => {
+        timedOut = true;
+        try { this.ollamaClient.abort(); } catch { /* best-effort */ }
+        resolve(null);
+      }, SUMMARY_TIMEOUT_MS);
+    });
+
+    const chatPromise = this.ollamaClient
+      .chat(model, [{ role: 'user', content: prompt }], () => {}, { contextSize: 4096, temperature: 0.2 })
+      .then((result) => (timedOut || !result || !result.text ? null : result.text.trim()))
+      .catch((err) => {
+        console.warn('[AgentCore] Context summarization failed:', err.message);
+        return null;
+      });
+
+    return Promise.race([chatPromise, timeoutPromise]);
   }
 
   /**
@@ -146,9 +266,10 @@ class AgentCore {
    *   2. Reserve 40% of context for the model's response
    *   3. Fill remaining budget from newest conversation messages backward
    *   4. If a message is too large, truncate its content
-   *   5. If older messages are dropped, inject a summary of completed work
+   *   5. If older messages are dropped, fold them into a running LLM-generated summary
+   *      (falling back to a cheap tool-name-only note if summarization fails/times out)
    */
-  _buildContextMessages(systemMessage, conversationHistory, contextSize) {
+  async _buildContextMessages(systemMessage, conversationHistory, contextSize, model) {
     const systemTokens = estimateTokens(systemMessage.content);
     const responseReserve = Math.floor(contextSize * 0.4);  // 40% for response
     let budget = contextSize - systemTokens - responseReserve;
@@ -185,22 +306,54 @@ class AgentCore {
       }
     }
 
-    // If messages were dropped, inject a progress summary so the model knows what happened
+    // If messages were dropped, fold them into a rolling summary so the model doesn't
+    // lose track of what already happened once history no longer fits the budget.
     if (droppedCount > 0) {
-      const droppedMessages = conversationHistory.slice(0, droppedCount);
-      const completedTools = [];
-      for (const msg of droppedMessages) {
-        if (msg.role === 'user' && msg.content.startsWith('Tool results:')) {
-          const toolMatches = msg.content.match(/\[Tool Result: (\w+)\]/g);
-          if (toolMatches) {
-            toolMatches.forEach(m => completedTools.push(m.replace('[Tool Result: ', '').replace(']', '')));
+      const fingerprint = this._conversationFingerprint(model, conversationHistory);
+      const cache = this._contextSummaryCache[fingerprint];
+      let summaryText = cache && cache.droppedCount === droppedCount ? cache.summary : null;
+
+      if (!summaryText) {
+        const sinceIndex = cache ? cache.droppedCount : 0;
+        const newlyDropped = conversationHistory.slice(sinceIndex, droppedCount);
+
+        if (newlyDropped.length > 0) {
+          const newlyDroppedText = newlyDropped
+            .map(m => `[${m.role}] ${m.content}`)
+            .join('\n')
+            .slice(-3000); // bound the summarizer's own input regardless of how much was dropped at once
+
+          const generated = await this._summarizeDroppedHistory(model, cache ? cache.summary : null, newlyDroppedText);
+          if (generated) {
+            summaryText = generated;
+            this._contextSummaryCache[fingerprint] = { droppedCount, summary: generated };
           }
         }
       }
 
-      if (completedTools.length > 0) {
-        const summary = `[Context note: Earlier messages were trimmed. Previously completed: ${completedTools.join(', ')} (${completedTools.length} tool operations). Continue from where you left off.]`;
-        selectedMessages.unshift({ role: 'system', content: summary });
+      if (summaryText) {
+        selectedMessages.unshift({
+          role: 'system',
+          content: `[Summary of earlier conversation — trimmed to fit context]\n${summaryText}`,
+        });
+      } else {
+        // Fallback: cheap tool-name-only note, used when summarization fails, times
+        // out, or the model hasn't produced anything usable yet.
+        const droppedMessages = conversationHistory.slice(0, droppedCount);
+        const completedTools = [];
+        for (const msg of droppedMessages) {
+          if (msg.role === 'user' && msg.content.startsWith('Tool results:')) {
+            const toolMatches = msg.content.match(/\[Tool Result: (\w+)\]/g);
+            if (toolMatches) {
+              toolMatches.forEach(m => completedTools.push(m.replace('[Tool Result: ', '').replace(']', '')));
+            }
+          }
+        }
+
+        if (completedTools.length > 0) {
+          const summary = `[Context note: Earlier messages were trimmed. Previously completed: ${completedTools.join(', ')} (${completedTools.length} tool operations). Continue from where you left off.]`;
+          selectedMessages.unshift({ role: 'system', content: summary });
+        }
       }
     }
 
@@ -394,18 +547,29 @@ class AgentCore {
             : `Step ${iteration}: Processing results...`,
         });
 
-        // Smart context: detect model's context window, build messages within budget
-        const contextSize = await this._getContextSize(model);
-        const messages = this._buildContextMessages(systemMessage, conversationHistory, contextSize);
+        // Smart context: detect model's max context window, build messages within budget
+        const maxContextSize = await this._getContextSize(model);
+        const messages = await this._buildContextMessages(systemMessage, conversationHistory, maxContextSize, model);
 
-        console.log(`[AgentCore] Iteration ${iteration}: ${messages.length} messages, ~${messages.reduce((s, m) => s + estimateTokens(m.content), 0)} tokens (budget: ${contextSize})`);
+        // Right-size num_ctx to what this request actually needs instead of always
+        // requesting the model's full (capped) window — smaller KV cache, faster prompt
+        // processing, less RAM/VRAM pressure on local hardware.
+        const neededTokens = messages.reduce((s, m) => s + estimateTokens(m.content), 0);
+        const numCtx = bucketNumCtx(neededTokens, maxContextSize);
+
+        // Native Ollama function-calling is only reliable on a handful of model families;
+        // everyone else keeps using the markdown ```tool``` block convention from the
+        // system prompt (parsed by parseToolCalls below).
+        const useNativeTools = supportsNativeToolCalling(model);
+
+        console.log(`[AgentCore] Iteration ${iteration}: ${messages.length} messages, ~${neededTokens} tokens (num_ctx: ${numCtx}/${maxContextSize}, native tools: ${useNativeTools})`);
 
         // Stream the LLM response
         let currentResponse = '';
         let firstToken = false;
         let insideThinkBlock = false;
 
-        currentResponse = await this.ollamaClient.chat(model, messages, (token) => {
+        const chatResult = await this.ollamaClient.chat(model, messages, (token) => {
           if (this._isGenerating) {
             // Track <think>...</think> blocks — don't stream thinking to UI
             if (token.includes('<think>')) {
@@ -425,13 +589,17 @@ class AgentCore {
             onToken(token);
           }
         }, {
-          contextSize,
+          contextSize: numCtx,
+          tools: useNativeTools ? TOOL_SCHEMAS : undefined,
           onProgress: (progress) => {
             if (progress.event === 'progress') {
               onStatus({ status: 'generating', message: `Generating... ${progress.tokensPerSec} tok/s` });
             }
           },
         });
+
+        currentResponse = chatResult.text;
+        const nativeToolCalls = chatResult.toolCalls || [];
 
         if (!this._isGenerating) {
           // Generation was stopped mid-stream
@@ -443,8 +611,11 @@ class AgentCore {
         // Strip <think>...</think> blocks from reasoning models (deepseek-r1)
         currentResponse = currentResponse.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
 
-        // Handle empty response (model produced nothing or only thinking)
-        if (!currentResponse || currentResponse.length < 2) {
+        // Handle empty response (model produced nothing or only thinking). Note: native
+        // function-calling models often legitimately return empty text content when they
+        // have tool_calls instead — that's not a failure, so only nudge-retry when there's
+        // no text AND no native tool call to fall back on.
+        if ((!currentResponse || currentResponse.length < 2) && nativeToolCalls.length === 0) {
           console.warn(`[AgentCore] Empty response at iteration ${iteration}, retrying with nudge`);
           conversationHistory.push({
             role: 'assistant',
@@ -457,8 +628,11 @@ class AgentCore {
           continue; // retry
         }
 
-        // Parse tool calls from the response
-        const toolCalls = parseToolCalls(currentResponse);
+        // Parse tool calls: prefer structured native tool_calls when the model returned
+        // them; otherwise fall back to the markdown ```tool``` block convention.
+        const toolCalls = nativeToolCalls.length > 0
+          ? convertNativeToolCalls(nativeToolCalls)
+          : parseToolCalls(currentResponse);
 
         if (toolCalls.length === 0) {
           // No tool calls — we're done
@@ -547,3 +721,14 @@ class AgentCore {
 }
 
 module.exports = AgentCore;
+
+// Exposed for unit testing only (see test/core.test.js) — not part of the public API
+// other modules should rely on.
+module.exports._testUtils = {
+  bucketNumCtx,
+  estimateTokens,
+  parseToolCalls,
+  tryParseToolJSON,
+  convertNativeToolCalls,
+  stripToolBlocks,
+};

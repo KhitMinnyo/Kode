@@ -7,6 +7,11 @@ const { execSync, spawn } = require('child_process');
 const MAX_FILE_READ_SIZE = 50 * 1024; // 50KB
 const COMMAND_TIMEOUT = 30000; // 30 seconds
 
+// zsh is the default shell on modern macOS, but Kode also ships a Linux build
+// (see package.json's `build.linux`/`build.deb` targets) where zsh usually isn't
+// installed. Pick a shell that actually exists on the platform we're running on.
+const DEFAULT_SHELL = process.platform === 'darwin' ? '/bin/zsh' : '/bin/bash';
+
 /**
  * Tool: create_file
  * Creates a new file with the given content. Automatically creates parent directories.
@@ -38,43 +43,54 @@ async function create_file(params, projectFolder) {
   }
 }
 
-// Adding firecrawl 
+/**
+ * Tool: firecrawl_scrape
+ * Extracts clean Markdown text from a URL via the Firecrawl API. Used for reading
+ * documentation, CVE writeups, or JS-rendered pages that http_request can't parse well.
+ * Requires a FIRECRAWL_API_KEY environment variable — without it, Firecrawl's API will
+ * reject the request, so we fail fast with a clear message instead of a silent 401.
+ */
+async function firecrawl_scrape(params) {
+  const url = (params && (params.url || params)) || '';
 
-async function firecrawl_scrape(args) {
-    const url = args.url || args; 
-    console.log(`[+] Agent is scraping via Firecrawl: ${url}`);
-    
-    try {
-        const response = await fetch("https://api.firecrawl.dev/v2/scrape", {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-                url: url,
-                formats: ["markdown"]
-                //  for extra functions
-            })
-        });
+  if (!url || typeof url !== 'string') {
+    return '❌ Error: "url" parameter is required.';
+  }
 
-        const result = await response.json();
-        
-        if (result.success && result.data && result.data.markdown) {
-            // Send Markdown result to agent
-            return `Scraped Content (Markdown) from ${url}:\n\n${result.data.markdown}`;
-        } else {
-            return `Error: Failed to scrape ${url}. Firecrawl response: ${JSON.stringify(result)}`;
-        }
-    } catch (error) {
-        return `Error executing firecrawl_scrape: ${error.message}`;
+  const apiKey = process.env.FIRECRAWL_API_KEY;
+  if (!apiKey) {
+    return '❌ Error: firecrawl_scrape requires a FIRECRAWL_API_KEY environment variable to be set. ' +
+      'Use http_request instead if you just need raw HTML/API data.';
+  }
+
+  console.log(`[+] Agent is scraping via Firecrawl: ${url}`);
+
+  try {
+    const response = await fetch('https://api.firecrawl.dev/v2/scrape', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        url,
+        formats: ['markdown'],
+      }),
+    });
+
+    const result = await response.json();
+
+    if (result.success && result.data && result.data.markdown) {
+      const content = result.data.markdown;
+      const maxLen = 5000;
+      const truncated = content.length > maxLen ? content.substring(0, maxLen) + '\n\n... (truncated)' : content;
+      return `🌐 Scraped Content (Markdown) from ${url}:\n\n${truncated}`;
     }
+    return `❌ Error: Failed to scrape ${url}. Firecrawl response: ${JSON.stringify(result)}`;
+  } catch (error) {
+    return `❌ Error executing firecrawl_scrape: ${error.message}`;
+  }
 }
-
-// Module export 
-module.exports = {
-    // Other tools can be added
-    firecrawl_scrape
-};
 
 /**
  * Tool: edit_file
@@ -108,10 +124,12 @@ async function edit_file(params, projectFolder) {
       return `❌ Error: Could not find the specified text in "${resolvedPath}".\nFile starts with:\n${preview}...`;
     }
 
-    // Count occurrences
+    // Split/join instead of String.replace(): replace() with a plain string argument
+    // only touches the FIRST match, which silently disagreed with the "Replaced N
+    // occurrence(s)" message below whenever old_content appeared more than once.
     const occurrences = currentContent.split(old_content).length - 1;
 
-    const updatedContent = currentContent.replace(old_content, new_content);
+    const updatedContent = currentContent.split(old_content).join(new_content);
     fs.writeFileSync(resolvedPath, updatedContent, 'utf-8');
 
     return `✅ File edited successfully: ${resolvedPath}\n` +
@@ -173,18 +191,51 @@ async function run_command(params, projectFolder) {
     return '❌ Error: "command" parameter is required.';
   }
 
-  // Safety check: block extremely destructive commands
+  // Safety check: block extremely destructive commands. This is a blocklist, not a
+  // sandbox — it catches known-catastrophic patterns but a local model can still
+  // hallucinate other harmful commands. Since Kode can also be pointed at its own
+  // source folder (self-editing), a wipe of $HOME or the app's own repo is just as
+  // real a risk as wiping the system, so those are covered here too.
   const dangerous = [
-    /^rm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+)?\/\s*$/,  // rm -rf /
-    /^rm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+)?(\/\*|~\/\*)$/,  // rm -rf /* or ~/*
+    /^\s*(sudo\s+)?rm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+)?\/\s*$/,  // rm -rf /
+    /^\s*(sudo\s+)?rm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+)?(\/\*|~\/\*|\$HOME\/\*)$/,  // rm -rf /* or ~/* or $HOME/*
+    /^\s*(sudo\s+)?rm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+(~|\$HOME)\s*$/,  // rm -rf ~ or $HOME (whole home dir)
+    /^\s*(sudo\s+)?rm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+\/(System|Library|Applications|bin|usr|etc|var|boot)(\/|\s*$)/i,  // rm -rf on core system dirs
+    /^\s*(sudo\s+)?rm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+\/Users(\/[a-zA-Z0-9_.-]+)?\s*$/i,  // rm -rf /Users or /Users/<name>
     /mkfs\./,
     /dd\s+if=.*of=\/dev\//,
-    /:(){ :\|:& };:/,  // Fork bomb
+    />\s*\/dev\/(disk\d|sd[a-z]|nvme\d|rdisk\d)\b/i,  // overwriting a raw disk device via redirection
+    /diskutil\s+(erasedisk|eraseVolume|reformat)/i,
+    /^\s*(sudo\s+)?chmod\s+-R\s+777\s+\/\s*$/,  // chmod -R 777 /
+    // Fork bomb, e.g. `:(){ :|:& };:` — the naive version of this regex (missing
+    // escaped parens/braces) silently failed to match the actual fork bomb string at
+    // all, since `()` was parsed as an empty capture group instead of literal
+    // characters. This version matches the classic form and common whitespace variants.
+    /:\s*\(\s*\)\s*\{[\s\S]*:\s*\|\s*:[\s\S]*\}\s*;\s*:/,
   ];
 
   for (const pattern of dangerous) {
     if (pattern.test(command)) {
       return `🚫 Blocked: This command appears to be destructive and has been blocked for safety.\nCommand: ${command}`;
+    }
+  }
+
+  // Warn-but-allow tier: patterns that are legitimate in red-team/pentest workflows
+  // (e.g. fetching and running a recon script on a Kali box) but are also a classic
+  // remote-code-execution shape. We can't gate these on a real user confirmation
+  // without new IPC plumbing between the agent loop and the UI, so instead we run
+  // them but make sure the risk is visible in the tool result the model/user sees.
+  const riskyButAllowed = [
+    { pattern: /curl[^|]*\|\s*(sudo\s+)?(ba)?sh\b/i, label: 'piping a downloaded script directly into a shell' },
+    { pattern: /wget[^|]*\|\s*(sudo\s+)?(ba)?sh\b/i, label: 'piping a downloaded script directly into a shell' },
+    { pattern: /base64\s+-d[^|]*\|\s*(ba)?sh\b/i, label: 'executing a base64-decoded payload' },
+    { pattern: /eval\s*\(\s*(curl|wget)/i, label: 'evaluating remotely-fetched code' },
+  ];
+  let riskWarning = '';
+  for (const { pattern, label } of riskyButAllowed) {
+    if (pattern.test(command)) {
+      riskWarning = `⚠️ Risk note: this command involves ${label} — review it carefully before trusting the output.\n\n`;
+      break;
     }
   }
 
@@ -215,7 +266,7 @@ async function run_command(params, projectFolder) {
     if (isServerCommand) {
       // Run server as a detached background process
       try {
-        const shell = process.platform === 'darwin' ? '/bin/zsh' : '/bin/bash';
+        const shell = DEFAULT_SHELL;
         const child = spawn(shell, ['-c', command], {
           cwd: projectFolder || process.cwd(),
           detached: true,
@@ -267,7 +318,7 @@ async function run_command(params, projectFolder) {
         if (earlyStdout.trim()) {
           result += `\n\nOutput:\n${earlyStdout.trim().substring(0, 500)}`;
         }
-        return result;
+        return riskWarning + result;
       } catch (err) {
         return `❌ Failed to start server: ${err.message}`;
       }
@@ -276,7 +327,7 @@ async function run_command(params, projectFolder) {
     const stdout = execSync(command, {
       timeout: cmdTimeout,
       encoding: 'utf-8',
-      shell: '/bin/zsh',
+      shell: DEFAULT_SHELL,
       cwd: projectFolder || process.cwd(),
       maxBuffer: 2 * 1024 * 1024, // 2MB for scan outputs
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -284,12 +335,12 @@ async function run_command(params, projectFolder) {
 
     const output = stdout.trim();
     if (output.length === 0) {
-      return `✅ Command executed successfully (no output):\n$ ${command}`;
+      return `${riskWarning}✅ Command executed successfully (no output):\n$ ${command}`;
     }
     // Truncate very long output (5KB for scan results)
     const maxLen = 5000;
     const truncated = output.length > maxLen ? output.substring(0, maxLen) + '\n\n... (output truncated)' : output;
-    return `✅ Command output:\n$ ${command}\n\n${truncated}`;
+    return `${riskWarning}✅ Command output:\n$ ${command}\n\n${truncated}`;
   } catch (err) {
     const exitCode = err.status || 'unknown';
     const stdout = (err.stdout || '').trim();
@@ -444,7 +495,7 @@ async function search_files(params, projectFolder) {
       cmd = `grep -rn --include='${file_pattern}' "${pattern.replace(/"/g, '\\"')}" "${resolvedPath}" 2>/dev/null | head -50`;
     }
 
-    const output = execSync(cmd, { encoding: 'utf-8', timeout: 15000, shell: '/bin/zsh' }).trim();
+    const output = execSync(cmd, { encoding: 'utf-8', timeout: 15000, shell: DEFAULT_SHELL }).trim();
 
     if (!output) return `🔍 No matches found for "${pattern}" in ${resolvedPath}`;
 
@@ -465,6 +516,139 @@ const tools = {
   list_directory,
   http_request,
   search_files,
+  firecrawl_scrape,
 };
 
+/**
+ * JSON-schema tool definitions in Ollama's native function-calling format
+ * (https://ollama.com/blog/tool-support). Only a subset of local models
+ * (llama3.1+, qwen2.5+, mistral-nemo, command-r, firefunction) actually honor
+ * the `tools` field — see agent/prompts.js `supportsNativeToolCalling()`.
+ * For every other model this is simply ignored and the markdown ```tool```
+ * block format in the system prompt is used instead.
+ */
+const TOOL_SCHEMAS = [
+  {
+    type: 'function',
+    function: {
+      name: 'create_file',
+      description: 'Create a new file with the given content. Creates parent directories automatically.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File path, relative to the project folder or absolute.' },
+          content: { type: 'string', description: 'Full file content to write.' },
+        },
+        required: ['path', 'content'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'edit_file',
+      description: 'Edit an existing file by replacing an exact block of old_content with new_content.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File path to edit.' },
+          old_content: { type: 'string', description: 'Exact existing text to find.' },
+          new_content: { type: 'string', description: 'Text to replace it with.' },
+        },
+        required: ['path', 'old_content', 'new_content'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_file',
+      description: 'Read and return the contents of a file (capped at 50KB).',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File path to read.' },
+        },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'run_command',
+      description: 'Execute a shell command (zsh/bash) and return its output. Long-running server commands are backgrounded automatically.',
+      parameters: {
+        type: 'object',
+        properties: {
+          command: { type: 'string', description: 'The shell command to run.' },
+        },
+        required: ['command'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_directory',
+      description: 'List the contents of a directory with file type and size info.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Directory path to list.' },
+        },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'http_request',
+      description: 'Make an HTTP/HTTPS request (GET, POST, etc.) — useful for API testing and vulnerability probing.',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'Target URL.' },
+          method: { type: 'string', description: 'HTTP method, defaults to GET.' },
+          headers: { type: 'object', description: 'Optional request headers.' },
+          body: { type: 'string', description: 'Optional request body.' },
+        },
+        required: ['url'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'search_files',
+      description: 'Grep-like search for a pattern across project files.',
+      parameters: {
+        type: 'object',
+        properties: {
+          pattern: { type: 'string', description: 'Text or regex pattern to search for.' },
+          path: { type: 'string', description: 'Directory to search in, defaults to project root.' },
+          file_pattern: { type: 'string', description: 'Glob to filter which files are searched, e.g. "*.js".' },
+        },
+        required: ['pattern'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'firecrawl_scrape',
+      description: 'Extract clean Markdown text from a URL (documentation, CVE pages, JS-rendered sites). Requires FIRECRAWL_API_KEY to be configured.',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'URL to scrape.' },
+        },
+        required: ['url'],
+      },
+    },
+  },
+];
+
 module.exports = tools;
+module.exports.TOOL_SCHEMAS = TOOL_SCHEMAS;

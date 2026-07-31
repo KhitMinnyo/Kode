@@ -63,6 +63,7 @@ When the user gives a **vague or multi-step request** like "finish this project"
 - **list_directory** — path
 - **http_request** — url, method, headers, body (HTTP requests, API testing)
 - **search_files** — pattern, path, file_pattern (grep-like search)
+- **firecrawl_scrape** — url (clean Markdown extraction from docs/CVE pages/JS-heavy sites; requires FIRECRAWL_API_KEY)
 
 ## macOS Notes
 - Port 5000 blocked (AirPlay). Use 5001/8080.
@@ -90,20 +91,6 @@ ${securitySection}
 - When asked to run something, RUN IT. Don't rewrite it.`;
 
 }
-
-const redTeamPrompt = `
-You are a highly skilled Red Team Agent and Web Security Specialist.
-...
-You have access to the following tools:
-1. run_command: Execute shell commands (e.g., nmap, curl).
-2. http_request: Make basic HTTP/HTTPS requests.
-3. firecrawl_scrape: Extract clean, readable Markdown text from ANY website, GitHub repo, or CVE details page. Use this tool instead of 'http_request' when you need to read documentation, analyze a target webpage's text, read JS files, or research exploits online.
-
-When investigating a target:
-- If you need to read a CVE description or exploit writeup, use firecrawl_scrape on the URL.
-- If you need to analyze the client-side logic of a web app, use firecrawl_scrape to get the clean code.
-...
-`;
 
 /**
  * Full red team / pentest prompt for uncensored models.
@@ -457,7 +444,26 @@ function getPentestPrompt() {
  * Returns the list of available tool names.
  */
 function getAvailableToolNames() {
-  return ['create_file', 'edit_file', 'read_file', 'run_command', 'list_directory', 'http_request', 'search_files'];
+  return ['create_file', 'edit_file', 'read_file', 'run_command', 'list_directory', 'http_request', 'search_files', 'firecrawl_scrape'];
 }
 
-module.exports = { getSystemPrompt, getAvailableToolNames };
+/**
+ * Whether a given Ollama model is known to support native function/tool-calling
+ * (the `tools` field in /api/chat, with structured `tool_calls` in the response).
+ * Most local fine-tunes used by Kode (deepseek-r1, DeepHat, dolphin) do NOT
+ * support this — they only know the markdown ```tool``` block format from the
+ * system prompt. Only enable the structured path for families that reliably
+ * support it, so we don't add unused tool-schema overhead to every request.
+ */
+function supportsNativeToolCalling(modelName = '') {
+  const model = modelName.toLowerCase();
+  const nativeFamilies = [
+    'llama3.1', 'llama3.2', 'llama3.3',
+    'qwen2.5', 'qwen2', 'qwen3',
+    'mistral-nemo', 'mistral-small', 'mixtral',
+    'command-r', 'firefunction', 'granite3',
+  ];
+  return nativeFamilies.some(f => model.includes(f));
+}
+
+module.exports = { getSystemPrompt, getAvailableToolNames, supportsNativeToolCalling };

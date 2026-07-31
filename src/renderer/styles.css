@@ -233,6 +233,26 @@ html, body {
   box-shadow: 0 0 0 3px rgba(99,102,241,0.15);
 }
 
+.context-hint {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: rgba(99, 102, 241, 0.1);
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.context-hint:hover {
+  background: rgba(99, 102, 241, 0.16);
+}
+
+.context-hint strong {
+  color: var(--text-primary);
+}
+
 /* ----- Sidebar Navigation ----- */
 .sidebar-nav {
   padding: 0 16px;
@@ -1687,6 +1707,25 @@ html, body {
 .settings-field input::placeholder {
   color: var(--text-muted);
   opacity: 0.6;
+}
+
+.settings-field select {
+  width: 100%;
+  padding: 10px 14px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+  cursor: pointer;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.settings-field select:focus {
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
 }
 
 /* IP row with port */

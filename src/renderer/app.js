@@ -29,6 +29,64 @@
     _tokenCount: 0,
   };
 
+  /**
+   * Basic debounce — delays invoking `fn` until `wait` ms have passed without
+   * another call. Used to avoid firing a model-warmup request for every model the
+   * user's mouse passes over while scrubbing through the dropdown.
+   */
+  function debounce(fn, wait) {
+    let timer = null;
+    return (...args) => {
+      clearTimeout(timer);
+      timer = setTimeout(() => fn(...args), wait);
+    };
+  }
+
+  const warmModelDebounced = debounce((model) => {
+    window.kode.warmModel(model).catch(() => {});
+  }, 500);
+
+  // Model-name substrings known to support a much larger context window than Kode's
+  // default 16K cap. This is a best-effort local heuristic (not queried from Ollama,
+  // since num_ctx capability isn't reliably reported) — used only to surface a hint
+  // pointing the user at Settings, never to change anything automatically.
+  const KNOWN_LARGE_CONTEXT_MODELS = [
+    { match: /qwen3\.6/i, tokens: 262144, label: '256K' },
+    { match: /qwen2\.5|qwen3/i, tokens: 131072, label: '128K' },
+    { match: /llama3\.1|llama3\.2|llama3\.3/i, tokens: 131072, label: '128K' },
+    { match: /mistral-nemo/i, tokens: 131072, label: '128K' },
+    { match: /command-r/i, tokens: 131072, label: '128K' },
+  ];
+
+  /**
+   * Show a small, dismiss-by-navigating hint when the selected model is known to
+   * support far more context than the current Settings cap — points the user at
+   * Settings rather than silently changing anything on their behalf.
+   */
+  async function updateContextHint() {
+    const hintEl = document.getElementById('context-hint');
+    if (!hintEl) return;
+
+    const known = state.currentModel && KNOWN_LARGE_CONTEXT_MODELS.find(k => k.match.test(state.currentModel));
+    if (!known) {
+      hintEl.hidden = true;
+      return;
+    }
+
+    try {
+      const settings = await window.kode.getSettings();
+      const currentCap = settings.maxContextTokens || 16384;
+      if (currentCap >= known.tokens) {
+        hintEl.hidden = true;
+        return;
+      }
+      hintEl.innerHTML = `💡 This model supports up to <strong>${known.label}</strong> context — Kode is capped at <strong>${currentCap.toLocaleString()}</strong>. Click to raise it in Settings.`;
+      hintEl.hidden = false;
+    } catch {
+      hintEl.hidden = true;
+    }
+  }
+
   /* ==========================================================
      DOM References
      ========================================================== */
@@ -127,6 +185,11 @@
 
       state.currentModel = models[0].name;
       updateChatTitle();
+      updateContextHint();
+
+      // Speculatively warm the default model so the first message doesn't pay
+      // full disk-load latency. Fire-and-forget — failures are non-fatal.
+      window.kode.warmModel(state.currentModel).catch(() => {});
     } catch (err) {
       console.error('Failed to load models:', err);
       const opt = document.createElement('option');
@@ -208,12 +271,22 @@
     const nc = newChatBtn();
     if (nc) nc.addEventListener('click', newChat);
 
+    // Context-window hint — click to jump straight to Settings
+    const contextHint = document.getElementById('context-hint');
+    if (contextHint) contextHint.addEventListener('click', openSettings);
+
     // Model change
     const ms = modelSelect();
     if (ms) {
       ms.addEventListener('change', (e) => {
         state.currentModel = e.target.value;
         updateChatTitle();
+        // Warm the newly selected model in the background so it's ready by the time
+        // the user actually sends a message. Debounced so quickly scrubbing through
+        // several models in the dropdown doesn't fire a warmup for each one — only
+        // the one the user actually settles on.
+        warmModelDebounced(state.currentModel);
+        updateContextHint();
       });
     }
 
@@ -1099,10 +1172,12 @@
       const hostInput = document.getElementById('ollama-host');
       const portInput = document.getElementById('ollama-port');
       const keyInput = document.getElementById('deepseek-key');
+      const contextInput = document.getElementById('max-context-tokens');
 
       if (hostInput) hostInput.value = settings.ollamaHost || 'localhost';
       if (portInput) portInput.value = settings.ollamaPort || 11434;
       if (keyInput) keyInput.value = settings.deepseekApiKey || '';
+      if (contextInput) contextInput.value = String(settings.maxContextTokens || 16384);
 
       switchProviderTab(settings.provider || 'ollama');
     } catch (err) {
@@ -1229,6 +1304,7 @@
     const host = document.getElementById('ollama-host')?.value?.trim() || 'localhost';
     const port = parseInt(document.getElementById('ollama-port')?.value, 10) || 11434;
     const apiKey = document.getElementById('deepseek-key')?.value?.trim() || '';
+    const maxContextTokens = parseInt(document.getElementById('max-context-tokens')?.value, 10) || 16384;
 
     try {
       const result = await window.kode.saveSettings({
@@ -1236,11 +1312,13 @@
         ollamaHost: host,
         ollamaPort: port,
         deepseekApiKey: apiKey,
+        maxContextTokens,
       });
 
       if (result.success) {
         closeSettings();
-        // Refresh connection status and models
+        // Refresh connection status and models (loadModels also refreshes the
+        // context-window hint against the newly-saved cap)
         await checkConnection();
         await loadModels();
       } else {

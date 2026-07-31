@@ -5,6 +5,13 @@ const http = require('http');
 const OLLAMA_BASE_URL = 'http://localhost:11434';
 const DEFAULT_TIMEOUT = 30000;
 
+// How long Ollama should keep a model resident in memory after the last request.
+// Local models (especially 7B-14B) can take many seconds to reload from disk, and the
+// default keep_alive is only 5 minutes. During an active agent session (multi-step tool
+// loops, back-and-forth chat) we want the model to stay warm rather than getting evicted
+// and reloaded on every follow-up message.
+const DEFAULT_KEEP_ALIVE = '15m';
+
 class OllamaClient {
   constructor(baseUrl = OLLAMA_BASE_URL) {
     const parsed = new URL(baseUrl);
@@ -285,8 +292,15 @@ class OllamaClient {
    * @param {function(string): void} onChunk - Callback invoked with each text token
    * @param {object} [opts] - Options
    * @param {number} [opts.contextSize] - Override num_ctx for this request
+   * @param {number} [opts.temperature] - Sampling temperature (defaults to 0.4 — local models
+   *   emit far more reliable tool-call JSON at lower temperature; raise it for pure Q&A models)
+   * @param {string|number} [opts.keepAlive] - How long Ollama keeps the model loaded after this
+   *   request (e.g. '15m', -1 for indefinite). Defaults to DEFAULT_KEEP_ALIVE.
+   * @param {Array<object>} [opts.tools] - Native Ollama tool/function schemas. Only honored by
+   *   models that support function-calling; ignored (harmlessly) by everything else.
    * @param {function(object): void} [opts.onProgress] - Progress callback: { event, elapsed, tokens, tokensPerSec }
-   * @returns {Promise<string>} - The full response text
+   * @returns {Promise<{text: string, toolCalls: Array<object>}>} - Full response text plus any
+   *   native tool calls the model returned (empty array if none / unsupported).
    */
   async chat(model, messages, onChunk = () => {}, opts = {}) {
     if (!model || typeof model !== 'string') {
@@ -301,6 +315,7 @@ class OllamaClient {
     const signal = this._abortController.signal;
 
     let fullResponse = '';
+    const toolCalls = [];
     const startTime = Date.now();
     let firstTokenTime = null;
     let tokenCount = 0;
@@ -312,12 +327,17 @@ class OllamaClient {
       model,
       messages,
       stream: true,
+      keep_alive: opts.keepAlive !== undefined ? opts.keepAlive : DEFAULT_KEEP_ALIVE,
       options: {
         num_ctx: numCtx,
-        temperature: 0.7,
+        temperature: opts.temperature !== undefined ? opts.temperature : 0.4,
         num_predict: Math.min(2048, Math.floor(numCtx * 0.4)),
       },
     };
+
+    if (Array.isArray(opts.tools) && opts.tools.length > 0) {
+      requestBody.tools = opts.tools;
+    }
 
     // First-token timeout: reasoning models (deepseek-r1) can take minutes to think
     const FIRST_TOKEN_TIMEOUT = 300000; // 5 minutes
@@ -335,6 +355,13 @@ class OllamaClient {
         // Debug: log first chunk structure
         if (chunkCount === 1) {
           console.log('[OllamaClient] First chunk keys:', Object.keys(chunk), 'message keys:', chunk.message ? Object.keys(chunk.message) : 'none');
+        }
+
+        // Aggregate native tool calls (Ollama returns these fully-formed on the
+        // assistant message, typically alongside the final/done chunk — not
+        // incrementally like OpenAI-style deltas).
+        if (chunk.message && Array.isArray(chunk.message.tool_calls) && chunk.message.tool_calls.length > 0) {
+          toolCalls.push(...chunk.message.tool_calls);
         }
 
         if (chunk.message && chunk.message.content !== undefined) {
@@ -381,9 +408,9 @@ class OllamaClient {
       clearTimeout(firstTokenTimeout);
       if (err.message === 'Request aborted') {
         if (!firstTokenTime) {
-          return '⏱️ Model took too long to respond. Try a smaller/faster model or simplify your request.';
+          return { text: '⏱️ Model took too long to respond. Try a smaller/faster model or simplify your request.', toolCalls: [] };
         }
-        return fullResponse;
+        return { text: fullResponse, toolCalls };
       }
       throw err;
     } finally {
@@ -391,7 +418,33 @@ class OllamaClient {
       this._abortController = null;
     }
 
-    return fullResponse;
+    return { text: fullResponse, toolCalls };
+  }
+
+  /**
+   * Preload a model into memory without generating a real response, so the first
+   * user message doesn't pay the full disk-load latency. Cheap: num_predict is
+   * capped at 1 token. Safe to call speculatively (e.g. when the user picks a
+   * model in the UI) — failures are swallowed since this is a best-effort optimization.
+   * @param {string} model - The model name to warm up
+   * @param {string|number} [keepAlive] - How long to keep it resident afterward
+   * @returns {Promise<boolean>} - true if the warmup request succeeded
+   */
+  async warmup(model, keepAlive = DEFAULT_KEEP_ALIVE) {
+    if (!model || typeof model !== 'string') return false;
+    try {
+      const res = await this._request('POST', '/api/chat', {
+        model,
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: false,
+        keep_alive: keepAlive,
+        options: { num_predict: 1 },
+      }, { timeout: 60000 });
+      return res.statusCode === 200;
+    } catch (err) {
+      console.warn(`[OllamaClient] Warmup failed for "${model}":`, err.message);
+      return false;
+    }
   }
 
   /**

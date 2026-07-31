@@ -34,6 +34,14 @@ contextBridge.exposeInMainWorld('kode', {
   stopGeneration: () => ipcRenderer.invoke('stop-generation'),
 
   /**
+   * Preload a model into Ollama's memory so the first real message responds faster.
+   * Best-effort — safe to call speculatively whenever the selected model changes.
+   * @param {string} model - The model name to warm up
+   * @returns {Promise<{success: boolean}>}
+   */
+  warmModel: (model) => ipcRenderer.invoke('warm-model', model),
+
+  /**
    * Register a callback for streaming text tokens.
    * @param {function(Event, string): void} callback
    * @returns {function(): void} Cleanup function to remove the listener

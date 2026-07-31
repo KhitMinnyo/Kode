@@ -407,9 +407,9 @@ class DeepSeekClient {
       clearTimeout(firstTokenTimeout);
       if (err.message === 'Request aborted') {
         if (!firstTokenTime) {
-          return '⏱️ Model took too long to respond. Try a different model or simplify your request.';
+          return { text: '⏱️ Model took too long to respond. Try a different model or simplify your request.', toolCalls: [] };
         }
-        return fullResponse;
+        return { text: fullResponse, toolCalls: [] };
       }
       throw err;
     } finally {
@@ -417,7 +417,10 @@ class DeepSeekClient {
       this._abortController = null;
     }
 
-    return fullResponse;
+    // toolCalls is always empty here — DeepSeek support is kept to the plain-text
+    // ```tool``` block convention (parsed by AgentCore) for now, matching OllamaClient's
+    // return shape so AgentCore can treat both providers identically.
+    return { text: fullResponse, toolCalls: [] };
   }
 
   /**

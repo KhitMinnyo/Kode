@@ -50,6 +50,7 @@
         <select id="model-select">
           <option disabled selected>Loading models…</option>
         </select>
+        <div class="context-hint" id="context-hint" hidden></div>
       </div>
 
       <!-- Projects -->
@@ -162,6 +163,27 @@
               <span class="tab-icon">🧠</span>
               DeepSeek API
             </button>
+          </div>
+        </div>
+
+        <!-- Performance -->
+        <div class="settings-group">
+          <div class="settings-group-title">
+            <span class="group-icon">⚡</span>
+            Performance
+          </div>
+          <div class="settings-field">
+            <label for="max-context-tokens">Max Context Window (tokens)</label>
+            <select id="max-context-tokens">
+              <option value="4096">4,096 — lowest RAM usage</option>
+              <option value="8192">8,192</option>
+              <option value="16384" selected>16,384 — default</option>
+              <option value="32768">32,768 — long conversations/large files</option>
+              <option value="65536">65,536</option>
+              <option value="131072">131,072 (128K)</option>
+              <option value="262144">262,144 (256K) — large-context models e.g. Qwen3.6</option>
+            </select>
+            <span class="field-hint">💡 Kode never exceeds your model's own context limit or this cap — raise it only if your model supports it and your machine has the RAM/VRAM to spare. Higher values use more memory per request.</span>
           </div>
         </div>
 

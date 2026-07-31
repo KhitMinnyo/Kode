@@ -11,7 +11,8 @@
     "build:dmg": "electron-builder --mac dmg",
     "build:zip": "electron-builder --mac zip",
     "build:linux": "electron-builder --linux",
-    "build:deb": "electron-builder --linux deb"
+    "build:deb": "electron-builder --linux deb",
+    "test": "node --test \"test/**/*.test.js\""
   },
   "author": "Kode",
   "license": "MIT",

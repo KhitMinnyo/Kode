@@ -35,6 +35,7 @@ function getDefaultSettings() {
     ollamaHost: 'localhost',     // Ollama server hostname/IP
     ollamaPort: 11434,           // Ollama server port
     deepseekApiKey: '',          // DeepSeek API key
+    maxContextTokens: 16384,     // Context-size ceiling; raise for large-context models (e.g. Qwen3.6)
   };
 }
 
@@ -59,7 +60,7 @@ function getActiveClient() {
   return appSettings.provider === 'deepseek' ? deepseekClient : ollamaClient;
 }
 
-const agentCore = new AgentCore(ollamaClient);
+const agentCore = new AgentCore(ollamaClient, appSettings.maxContextTokens);
 
 // ─── Chat Storage ────────────────────────────────────────────────────────────
 const CHATS_FILE = path.join(app.getPath('userData'), 'kode-chats.json');
@@ -281,6 +282,24 @@ function registerIPCHandlers() {
         error: err.message,
         history: conversationHistory,
       };
+    }
+  });
+
+  /**
+   * Preload (warm up) a model into Ollama's memory ahead of the first real message,
+   * so the user doesn't pay full disk-load latency on their first prompt. Best-effort:
+   * failures are non-fatal since generation will still trigger a load anyway.
+   */
+  ipcMain.handle('warm-model', async (event, model) => {
+    try {
+      if (appSettings.provider !== 'ollama' || !model) {
+        return { success: false, skipped: true };
+      }
+      const ok = await ollamaClient.warmup(model);
+      return { success: ok };
+    } catch (err) {
+      console.error('[IPC:warm-model] Error:', err.message);
+      return { success: false, error: err.message };
     }
   });
 
@@ -531,6 +550,9 @@ function registerIPCHandlers() {
 
       // Update AgentCore's client reference based on provider
       agentCore.ollamaClient = getActiveClient();
+
+      // Apply the (possibly changed) context-size ceiling
+      agentCore.setMaxContextCap(appSettings.maxContextTokens);
 
       return { success: true, settings: appSettings };
     } catch (err) {
