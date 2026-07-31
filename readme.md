@@ -72,8 +72,8 @@ npm start
 # Build .app and .dmg
 npm run build
 
-# Output: dist/Kode-1.0.0-arm64.dmg (Apple Silicon)
-#         dist/Kode-1.0.0-x64.dmg   (Intel)
+# Output: dist/Kode-1.1.0-arm64.dmg (Apple Silicon)
+#         dist/Kode-1.1.0-x64.dmg   (Intel)
 ```
 
 ## 🏗️ Project Structure
