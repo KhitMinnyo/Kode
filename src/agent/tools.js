@@ -3,14 +3,32 @@
 const fs = require('fs');
 const path = require('path');
 const { execSync, spawn } = require('child_process');
+const memory = require('./memory');
 
 const MAX_FILE_READ_SIZE = 50 * 1024; // 50KB
 const COMMAND_TIMEOUT = 30000; // 30 seconds
+const EXTERNAL_FETCH_TIMEOUT = 15000; // 15 seconds — for calls to external APIs (Firecrawl, Brave Search)
 
 // zsh is the default shell on modern macOS, but Kode also ships a Linux build
 // (see package.json's `build.linux`/`build.deb` targets) where zsh usually isn't
 // installed. Pick a shell that actually exists on the platform we're running on.
 const DEFAULT_SHELL = process.platform === 'darwin' ? '/bin/zsh' : '/bin/bash';
+
+/**
+ * fetch() has no default timeout — an unresponsive external API would otherwise hang
+ * the whole agent loop indefinitely (run_command has its own timeout via execSync,
+ * but the plain `fetch`-based tools didn't have an equivalent). Wraps fetch with an
+ * AbortController so a slow/dead server fails fast with a clear message instead.
+ */
+async function fetchWithTimeout(url, options = {}, timeout = EXTERNAL_FETCH_TIMEOUT) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /**
  * Tool: create_file
@@ -66,7 +84,7 @@ async function firecrawl_scrape(params) {
   console.log(`[+] Agent is scraping via Firecrawl: ${url}`);
 
   try {
-    const response = await fetch('https://api.firecrawl.dev/v2/scrape', {
+    const response = await fetchWithTimeout('https://api.firecrawl.dev/v2/scrape', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -88,7 +106,66 @@ async function firecrawl_scrape(params) {
     }
     return `❌ Error: Failed to scrape ${url}. Firecrawl response: ${JSON.stringify(result)}`;
   } catch (error) {
+    if (error.name === 'AbortError') {
+      return `⏱️ Error: firecrawl_scrape timed out after ${EXTERNAL_FETCH_TIMEOUT / 1000}s fetching ${url}.`;
+    }
     return `❌ Error executing firecrawl_scrape: ${error.message}`;
+  }
+}
+
+/**
+ * Tool: web_search
+ * Searches the web via the Brave Search API. Requires a BRAVE_SEARCH_API_KEY
+ * environment variable (free tier available at brave.com/search/api). This is how
+ * local Ollama models — which have no built-in web access and a training cutoff —
+ * can look up current information; pair it with firecrawl_scrape to read the most
+ * relevant result in full, and save_memory to keep what was learned for next time.
+ */
+async function web_search(params) {
+  const query = params && params.query;
+
+  if (!query || typeof query !== 'string') {
+    return '❌ Error: "query" parameter is required.';
+  }
+
+  const apiKey = process.env.BRAVE_SEARCH_API_KEY;
+  if (!apiKey) {
+    return '❌ Error: web_search requires a BRAVE_SEARCH_API_KEY environment variable to be set. ' +
+      'Get a free key at https://brave.com/search/api/.';
+  }
+
+  try {
+    const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=8`;
+    const response = await fetchWithTimeout(url, {
+      headers: {
+        'Accept': 'application/json',
+        'X-Subscription-Token': apiKey,
+      },
+    });
+
+    if (!response.ok) {
+      const body = await response.text();
+      return `❌ Error: Brave Search API returned HTTP ${response.status}: ${body.slice(0, 300)}`;
+    }
+
+    const data = await response.json();
+    const results = data?.web?.results || [];
+
+    if (results.length === 0) {
+      return `🔍 No web results found for "${query}".`;
+    }
+
+    const formatted = results
+      .slice(0, 8)
+      .map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.description || ''}`.trim())
+      .join('\n\n');
+
+    return `🔍 Web search results for "${query}":\n\n${formatted}\n\n(Use firecrawl_scrape on a promising URL to read the full page, and save_memory to keep what you learn.)`;
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      return `⏱️ Error: web_search timed out after ${EXTERNAL_FETCH_TIMEOUT / 1000}s.`;
+    }
+    return `❌ Error executing web_search: ${error.message}`;
   }
 }
 
@@ -507,6 +584,60 @@ async function search_files(params, projectFolder) {
   }
 }
 
+/**
+ * Tool: save_memory
+ * Persists a durable fact/note for this project to <project>/.kode/memory.json, so it
+ * survives context trims, app restarts, and new chats — unlike the in-session rolling
+ * summary, this is explicit, inspectable, and only written when the model decides
+ * something is actually worth remembering long-term.
+ */
+async function save_memory(params, projectFolder) {
+  const { key, value, tags } = params;
+
+  if (!projectFolder) {
+    return '❌ Error: save_memory requires an active project folder.';
+  }
+  if (!key || typeof key !== 'string') {
+    return '❌ Error: "key" parameter is required (a short label for this memory, e.g. "dev-server-port").';
+  }
+  if (typeof value !== 'string' || !value.trim()) {
+    return '❌ Error: "value" parameter is required (the fact/note to remember).';
+  }
+
+  try {
+    const entry = memory.upsertMemoryEntry(projectFolder, key.trim(), value.trim(), Array.isArray(tags) ? tags : []);
+    return `🧠 Saved to project memory: [${entry.key}] ${entry.value}`;
+  } catch (err) {
+    return `❌ Error saving memory: ${err.message}`;
+  }
+}
+
+/**
+ * Tool: recall_memory
+ * Searches previously-saved project memory by keyword overlap. Use this when
+ * something might have been established earlier in this project (conventions,
+ * credentials locations, prior research) but isn't in the current context window.
+ */
+async function recall_memory(params, projectFolder) {
+  const { query } = params;
+
+  if (!projectFolder) {
+    return '❌ Error: recall_memory requires an active project folder.';
+  }
+
+  try {
+    const results = memory.searchMemory(projectFolder, query || '', 8);
+    if (results.length === 0) {
+      return query
+        ? `🧠 No saved memory matched "${query}".`
+        : '🧠 No memory saved for this project yet.';
+    }
+    return `🧠 Recalled memory${query ? ` for "${query}"` : ''}:\n${memory.formatMemoryEntries(results)}`;
+  } catch (err) {
+    return `❌ Error recalling memory: ${err.message}`;
+  }
+}
+
 // Export all tools as a name→handler map
 const tools = {
   create_file,
@@ -517,6 +648,9 @@ const tools = {
   http_request,
   search_files,
   firecrawl_scrape,
+  web_search,
+  save_memory,
+  recall_memory,
 };
 
 /**
@@ -645,6 +779,50 @@ const TOOL_SCHEMAS = [
           url: { type: 'string', description: 'URL to scrape.' },
         },
         required: ['url'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'web_search',
+      description: 'Search the web via Brave Search for current information not available locally or in training data. Requires BRAVE_SEARCH_API_KEY. Follow up with firecrawl_scrape to read a full page, and save_memory to keep useful findings.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Search query.' },
+        },
+        required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'save_memory',
+      description: 'Persist a durable fact or note about this project to long-term memory, so it survives context trims, app restarts, and new chats. Use for things worth remembering across sessions (conventions, decisions, environment quirks, research findings) — not for transient conversation details.',
+      parameters: {
+        type: 'object',
+        properties: {
+          key: { type: 'string', description: 'Short label for this memory, e.g. "dev-server-port" or "auth-flow-decision".' },
+          value: { type: 'string', description: 'The fact or note to remember.' },
+          tags: { type: 'array', items: { type: 'string' }, description: 'Optional keywords to help find this later.' },
+        },
+        required: ['key', 'value'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'recall_memory',
+      description: 'Search this project\'s long-term memory for previously-saved facts/notes that might not be in the current context window.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'What to search for. Leave empty to list the most recently saved memories.' },
+        },
+        required: [],
       },
     },
   },

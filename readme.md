@@ -4,7 +4,7 @@
   <img src="icon.png" width="128" height="128" alt="Kode Logo">
 </p>
 
-**Kode** is a native macOS desktop AI agent powered by [Ollama](https://ollama.ai). It combines a full-featured coding assistant with professional-grade penetration testing capabilities — all running locally on your machine.
+**Kode** is a native macOS desktop AI agent built primarily around local [Ollama](https://ollama.ai) models, with optional cloud providers (OpenAI, Anthropic Claude, DeepSeek) available in Settings. It combines a full-featured coding assistant with professional-grade penetration testing capabilities, plus persistent per-project memory and web research tools.
 
 ## ✨ Features
 

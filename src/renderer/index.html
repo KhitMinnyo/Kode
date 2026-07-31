@@ -3,12 +3,19 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- connect-src is intentionally 'self' only: the renderer never makes network
+       requests directly — all Ollama/OpenAI/Anthropic/DeepSeek/web_search traffic goes
+       through main.js via IPC (see preload.js), which runs outside the renderer and
+       isn't subject to this CSP at all. A wildcard here would only help an attacker
+       who'd already gotten script execution (e.g. via unsanitized content) exfiltrate
+       data — it isn't needed for any legitimate feature. -->
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self';
                script-src 'self' https://cdnjs.cloudflare.com;
                style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com;
                font-src https://fonts.gstatic.com;
-               connect-src *;" />
+               img-src 'self' data:;
+               connect-src 'self';" />
   <title>Kode — AI Agent</title>
 
   <!-- Google Fonts — Inter -->
@@ -22,6 +29,12 @@
 
   <!-- Marked — markdown parser -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.0/marked.min.js"></script>
+
+  <!-- DOMPurify — sanitizes marked's HTML output before it's ever inserted into the DOM.
+       Necessary because assistant messages can contain content pulled from the web
+       (firecrawl_scrape, web_search) or from files in the project — none of that is
+       trustworthy input, and marked.parse() alone does not sanitize. -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
 
   <!-- App styles -->
   <link rel="stylesheet" href="styles.css" />
@@ -83,6 +96,10 @@
         <button class="sidebar-btn new-chat-btn" id="new-chat-btn">
           <span class="btn-icon">＋</span>
           <span>New Chat</span>
+        </button>
+        <button class="settings-btn" id="memory-btn">
+          <span class="btn-icon">🧠</span>
+          <span>Memory</span>
         </button>
         <button class="settings-btn" id="settings-btn">
           <span class="btn-icon">⚙️</span>
@@ -163,6 +180,14 @@
               <span class="tab-icon">🧠</span>
               DeepSeek API
             </button>
+            <button class="provider-tab" data-provider="openai" id="tab-openai">
+              <span class="tab-icon">🤖</span>
+              OpenAI API
+            </button>
+            <button class="provider-tab" data-provider="anthropic" id="tab-anthropic">
+              <span class="tab-icon">🔮</span>
+              Claude API
+            </button>
           </div>
         </div>
 
@@ -236,12 +261,80 @@
           <div class="connection-result" id="deepseek-result"></div>
         </div>
 
+        <!-- OpenAI Config -->
+        <div class="provider-config" id="config-openai">
+          <div class="settings-group">
+            <div class="settings-group-title">
+              <span class="group-icon">🔑</span>
+              OpenAI API
+            </div>
+            <div class="settings-field">
+              <label for="openai-key">API Key</label>
+              <div class="api-key-wrapper">
+                <input type="password" id="openai-key" placeholder="sk-..." />
+                <button class="api-key-toggle" id="toggle-openai-key-vis" title="Toggle visibility">👁</button>
+              </div>
+              <span class="field-hint">🔗 Get your API key from <strong>platform.openai.com</strong></span>
+            </div>
+          </div>
+          <button class="test-connection-btn" id="test-openai-btn">
+            <span>🔍</span> Test API Key
+          </button>
+          <div class="connection-result" id="openai-result"></div>
+        </div>
+
+        <!-- Anthropic (Claude) Config -->
+        <div class="provider-config" id="config-anthropic">
+          <div class="settings-group">
+            <div class="settings-group-title">
+              <span class="group-icon">🔑</span>
+              Claude API
+            </div>
+            <div class="settings-field">
+              <label for="anthropic-key">API Key</label>
+              <div class="api-key-wrapper">
+                <input type="password" id="anthropic-key" placeholder="sk-ant-..." />
+                <button class="api-key-toggle" id="toggle-anthropic-key-vis" title="Toggle visibility">👁</button>
+              </div>
+              <span class="field-hint">🔗 Get your API key from <strong>console.anthropic.com</strong></span>
+            </div>
+          </div>
+          <button class="test-connection-btn" id="test-anthropic-btn">
+            <span>🔍</span> Test API Key
+          </button>
+          <div class="connection-result" id="anthropic-result"></div>
+        </div>
+
       </div>
 
       <!-- Footer -->
       <div class="settings-footer">
         <button class="settings-cancel-btn" id="settings-cancel-btn">Cancel</button>
         <button class="settings-save-btn" id="settings-save-btn">Save & Apply</button>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ====================== Memory Modal ====================== -->
+  <div class="settings-overlay" id="memory-overlay">
+    <div class="settings-modal">
+
+      <div class="settings-header">
+        <h2>🧠 Project Memory</h2>
+        <button class="settings-close-btn" id="memory-close-btn">✕</button>
+      </div>
+
+      <div class="settings-body">
+        <div class="settings-group">
+          <span class="field-hint" id="memory-project-hint">💡 Facts the model has explicitly saved for the active project via save_memory — persists across restarts and new chats. Stored at &lt;project&gt;/.kode/memory.json.</span>
+        </div>
+        <div id="memory-list" class="memory-list"></div>
+      </div>
+
+      <div class="settings-footer">
+        <button class="settings-cancel-btn" id="memory-refresh-btn">↻ Refresh</button>
+        <button class="settings-save-btn" id="memory-close-btn-2">Close</button>
       </div>
 
     </div>

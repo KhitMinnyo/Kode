@@ -118,3 +118,40 @@ test('TOOL_SCHEMAS covers every tool name returned by the module', () => {
   const toolNames = Object.keys(tools).filter(k => typeof tools[k] === 'function').sort();
   assert.deepEqual(schemaNames, toolNames);
 });
+
+test('save_memory requires an active project folder', async () => {
+  const result = await tools.save_memory({ key: 'a', value: 'b' }, null);
+  assert.match(result, /requires an active project folder/);
+});
+
+test('save_memory and recall_memory round-trip through the project memory store', async () => {
+  const dir = makeTempDir();
+  const saveResult = await tools.save_memory({ key: 'dev-port', value: 'App runs on port 5001', tags: ['flask'] }, dir);
+  assert.match(saveResult, /🧠 Saved/);
+
+  const recallResult = await tools.recall_memory({ query: 'what port' }, dir);
+  assert.match(recallResult, /dev-port/);
+  assert.match(recallResult, /5001/);
+});
+
+test('recall_memory reports clearly when nothing matches', async () => {
+  const dir = makeTempDir();
+  const result = await tools.recall_memory({ query: 'nonexistent-topic' }, dir);
+  assert.match(result, /No saved memory matched/);
+});
+
+test('web_search fails clearly without an API key configured', async () => {
+  const original = process.env.BRAVE_SEARCH_API_KEY;
+  delete process.env.BRAVE_SEARCH_API_KEY;
+  try {
+    const result = await tools.web_search({ query: 'test query' });
+    assert.match(result, /BRAVE_SEARCH_API_KEY/);
+  } finally {
+    if (original !== undefined) process.env.BRAVE_SEARCH_API_KEY = original;
+  }
+});
+
+test('web_search requires a query parameter', async () => {
+  const result = await tools.web_search({});
+  assert.match(result, /query.*required/i);
+});

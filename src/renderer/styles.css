@@ -1195,6 +1195,10 @@ html, body {
 .tool-card.tool-edit        { border-left-color: var(--warning); }
 .tool-card.tool-read        { border-left-color: #818cf8; }
 .tool-card.tool-directory   { border-left-color: #f472b6; }
+.tool-card.tool-http        { border-left-color: #22d3ee; }
+.tool-card.tool-search      { border-left-color: #a3e635; }
+.tool-card.tool-scrape      { border-left-color: #fb923c; }
+.tool-card.tool-memory      { border-left-color: #c084fc; }
 
 .tool-card-header {
   display: flex;
@@ -1615,6 +1619,7 @@ html, body {
 /* Provider tabs */
 .provider-tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
   background: rgba(255, 255, 255, 0.03);
   border-radius: var(--radius-sm);
@@ -1623,7 +1628,7 @@ html, body {
 }
 
 .provider-tab {
-  flex: 1;
+  flex: 1 1 45%;
   padding: 10px 16px;
   border: none;
   border-radius: 6px;
@@ -1684,6 +1689,76 @@ html, body {
   font-size: 11px;
   color: var(--text-muted);
   opacity: 0.8;
+}
+
+/* Memory panel */
+.memory-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.memory-empty-state {
+  padding: 24px 16px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.memory-entry {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 14px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-sm);
+}
+
+.memory-entry-body {
+  min-width: 0;
+  flex: 1;
+}
+
+.memory-entry-key {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.memory-entry-value {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.memory-entry-meta {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.memory-entry-delete-btn {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.2s ease;
+}
+
+.memory-entry-delete-btn:hover {
+  color: #f87171;
+  border-color: #f87171;
+  background: rgba(248, 113, 113, 0.08);
 }
 
 .settings-field input {

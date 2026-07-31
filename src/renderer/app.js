@@ -112,6 +112,7 @@
     setupInputListeners();
     setupStreamListeners();
     setupSettingsListeners();
+    setupMemoryListeners();
     await checkConnection();
     await loadModels();
     await loadProjectFolder();
@@ -1098,6 +1099,130 @@
   }
 
   /* ==========================================================
+     Memory Modal (per-project long-term memory viewer)
+     ========================================================== */
+  function setupMemoryListeners() {
+    const memoryBtn = document.getElementById('memory-btn');
+    const overlay = document.getElementById('memory-overlay');
+    const closeBtn = document.getElementById('memory-close-btn');
+    const closeBtn2 = document.getElementById('memory-close-btn-2');
+    const refreshBtn = document.getElementById('memory-refresh-btn');
+
+    if (memoryBtn) memoryBtn.addEventListener('click', openMemoryPanel);
+    if (closeBtn) closeBtn.addEventListener('click', closeMemoryPanel);
+    if (closeBtn2) closeBtn2.addEventListener('click', closeMemoryPanel);
+    if (refreshBtn) refreshBtn.addEventListener('click', openMemoryPanel);
+
+    if (overlay) {
+      overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) closeMemoryPanel();
+      });
+    }
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && overlay && overlay.classList.contains('active')) {
+        closeMemoryPanel();
+      }
+    });
+  }
+
+  function closeMemoryPanel() {
+    const overlay = document.getElementById('memory-overlay');
+    if (overlay) overlay.classList.remove('active');
+  }
+
+  async function openMemoryPanel() {
+    const overlay = document.getElementById('memory-overlay');
+    if (!overlay) return;
+    overlay.classList.add('active');
+
+    const listEl = document.getElementById('memory-list');
+    if (!listEl) return;
+    listEl.textContent = '';
+
+    let result;
+    try {
+      result = await window.kode.listMemory();
+    } catch (err) {
+      renderMemoryEmptyState(listEl, `❌ Failed to load memory: ${err.message}`);
+      return;
+    }
+
+    if (!result || !result.success) {
+      renderMemoryEmptyState(listEl, result?.error === 'No active project'
+        ? '📁 Open a project folder to view its saved memory.'
+        : `❌ ${result?.error || 'Failed to load memory.'}`);
+      return;
+    }
+
+    renderMemoryList(listEl, result.entries || []);
+  }
+
+  function renderMemoryEmptyState(listEl, message) {
+    const div = document.createElement('div');
+    div.className = 'memory-empty-state';
+    div.textContent = message;
+    listEl.appendChild(div);
+  }
+
+  function renderMemoryList(listEl, entries) {
+    if (!entries || entries.length === 0) {
+      renderMemoryEmptyState(listEl, '🧠 No memories saved yet for this project. The model will save facts here as it works using save_memory.');
+      return;
+    }
+
+    // Most recently updated first.
+    const sorted = [...entries].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+
+    for (const entry of sorted) {
+      const item = document.createElement('div');
+      item.className = 'memory-entry';
+
+      const body = document.createElement('div');
+      body.className = 'memory-entry-body';
+
+      const keyEl = document.createElement('div');
+      keyEl.className = 'memory-entry-key';
+      keyEl.textContent = entry.key;
+      body.appendChild(keyEl);
+
+      const valueEl = document.createElement('div');
+      valueEl.className = 'memory-entry-value';
+      valueEl.textContent = entry.value;
+      body.appendChild(valueEl);
+
+      const metaParts = [];
+      if (Array.isArray(entry.tags) && entry.tags.length > 0) metaParts.push(`tags: ${entry.tags.join(', ')}`);
+      if (entry.updatedAt) metaParts.push(`updated ${formatTimeAgo(entry.updatedAt)}`);
+      if (metaParts.length > 0) {
+        const metaEl = document.createElement('div');
+        metaEl.className = 'memory-entry-meta';
+        metaEl.textContent = metaParts.join(' · ');
+        body.appendChild(metaEl);
+      }
+
+      item.appendChild(body);
+
+      const deleteBtn = document.createElement('button');
+      deleteBtn.className = 'memory-entry-delete-btn';
+      deleteBtn.textContent = '🗑';
+      deleteBtn.title = 'Delete this memory';
+      deleteBtn.addEventListener('click', async () => {
+        deleteBtn.disabled = true;
+        try {
+          await window.kode.deleteMemoryEntry(entry.key);
+        } catch (err) {
+          console.error('Failed to delete memory entry:', err);
+        }
+        openMemoryPanel();
+      });
+      item.appendChild(deleteBtn);
+
+      listEl.appendChild(item);
+    }
+  }
+
+  /* ==========================================================
      Settings Modal
      ========================================================== */
   function setupSettingsListeners() {
@@ -1134,32 +1259,45 @@
     // Provider tabs
     const tabOllama = document.getElementById('tab-ollama');
     const tabDeepseek = document.getElementById('tab-deepseek');
+    const tabOpenai = document.getElementById('tab-openai');
+    const tabAnthropic = document.getElementById('tab-anthropic');
 
     if (tabOllama) tabOllama.addEventListener('click', () => switchProviderTab('ollama'));
     if (tabDeepseek) tabDeepseek.addEventListener('click', () => switchProviderTab('deepseek'));
+    if (tabOpenai) tabOpenai.addEventListener('click', () => switchProviderTab('openai'));
+    if (tabAnthropic) tabAnthropic.addEventListener('click', () => switchProviderTab('anthropic'));
 
     // Test buttons
     const testOllama = document.getElementById('test-ollama-btn');
     const testDeepseek = document.getElementById('test-deepseek-btn');
+    const testOpenai = document.getElementById('test-openai-btn');
+    const testAnthropic = document.getElementById('test-anthropic-btn');
 
     if (testOllama) testOllama.addEventListener('click', testOllamaConnection);
     if (testDeepseek) testDeepseek.addEventListener('click', testDeepseekConnection);
+    if (testOpenai) testOpenai.addEventListener('click', testOpenaiConnection);
+    if (testAnthropic) testAnthropic.addEventListener('click', testAnthropicConnection);
 
-    // API key visibility toggle
-    const toggleVis = document.getElementById('toggle-key-vis');
-    if (toggleVis) {
-      toggleVis.addEventListener('click', () => {
-        const input = document.getElementById('deepseek-key');
-        if (!input) return;
-        if (input.type === 'password') {
-          input.type = 'text';
-          toggleVis.textContent = '🙈';
-        } else {
-          input.type = 'password';
-          toggleVis.textContent = '👁';
-        }
-      });
-    }
+    // API key visibility toggles — same pattern for all three cloud providers
+    setupKeyVisibilityToggle('toggle-key-vis', 'deepseek-key');
+    setupKeyVisibilityToggle('toggle-openai-key-vis', 'openai-key');
+    setupKeyVisibilityToggle('toggle-anthropic-key-vis', 'anthropic-key');
+  }
+
+  function setupKeyVisibilityToggle(toggleId, inputId) {
+    const toggleVis = document.getElementById(toggleId);
+    if (!toggleVis) return;
+    toggleVis.addEventListener('click', () => {
+      const input = document.getElementById(inputId);
+      if (!input) return;
+      if (input.type === 'password') {
+        input.type = 'text';
+        toggleVis.textContent = '🙈';
+      } else {
+        input.type = 'password';
+        toggleVis.textContent = '👁';
+      }
+    });
   }
 
   async function openSettings() {
@@ -1172,11 +1310,15 @@
       const hostInput = document.getElementById('ollama-host');
       const portInput = document.getElementById('ollama-port');
       const keyInput = document.getElementById('deepseek-key');
+      const openaiKeyInput = document.getElementById('openai-key');
+      const anthropicKeyInput = document.getElementById('anthropic-key');
       const contextInput = document.getElementById('max-context-tokens');
 
       if (hostInput) hostInput.value = settings.ollamaHost || 'localhost';
       if (portInput) portInput.value = settings.ollamaPort || 11434;
       if (keyInput) keyInput.value = settings.deepseekApiKey || '';
+      if (openaiKeyInput) openaiKeyInput.value = settings.openaiApiKey || '';
+      if (anthropicKeyInput) anthropicKeyInput.value = settings.anthropicApiKey || '';
       if (contextInput) contextInput.value = String(settings.maxContextTokens || 16384);
 
       switchProviderTab(settings.provider || 'ollama');
@@ -1204,6 +1346,8 @@
     // Update config panels
     document.getElementById('config-ollama')?.classList.toggle('active', provider === 'ollama');
     document.getElementById('config-deepseek')?.classList.toggle('active', provider === 'deepseek');
+    document.getElementById('config-openai')?.classList.toggle('active', provider === 'openai');
+    document.getElementById('config-anthropic')?.classList.toggle('active', provider === 'anthropic');
   }
 
   function getSelectedProvider() {
@@ -1248,10 +1392,14 @@
     }
   }
 
-  async function testDeepseekConnection() {
-    const btn = document.getElementById('test-deepseek-btn');
-    const resultEl = document.getElementById('deepseek-result');
-    const apiKey = document.getElementById('deepseek-key')?.value?.trim() || '';
+  /**
+   * Generic "validate an API key against a cloud provider" flow, shared by DeepSeek,
+   * OpenAI, and Anthropic — they only differ in which settings key/DOM ids they use.
+   */
+  async function testApiKeyConnection({ provider, btnId, resultId, inputId, label }) {
+    const btn = document.getElementById(btnId);
+    const resultEl = document.getElementById(resultId);
+    const apiKey = document.getElementById(inputId)?.value?.trim() || '';
 
     if (!btn || !resultEl) return;
 
@@ -1268,14 +1416,14 @@
 
     try {
       const result = await window.kode.testConnection({
-        provider: 'deepseek',
-        deepseekApiKey: apiKey,
+        provider,
+        [`${provider}ApiKey`]: apiKey,
       });
 
       resultEl.classList.add('visible');
       if (result.connected) {
         resultEl.className = 'connection-result visible success';
-        resultEl.textContent = '✅ DeepSeek API key is valid';
+        resultEl.textContent = `✅ ${label} API key is valid`;
       } else {
         resultEl.className = 'connection-result visible error';
         resultEl.textContent = `❌ Invalid: ${result.error || 'Authentication failed'}`;
@@ -1289,8 +1437,12 @@
     }
   }
 
+  const testDeepseekConnection = () => testApiKeyConnection({ provider: 'deepseek', btnId: 'test-deepseek-btn', resultId: 'deepseek-result', inputId: 'deepseek-key', label: 'DeepSeek' });
+  const testOpenaiConnection = () => testApiKeyConnection({ provider: 'openai', btnId: 'test-openai-btn', resultId: 'openai-result', inputId: 'openai-key', label: 'OpenAI' });
+  const testAnthropicConnection = () => testApiKeyConnection({ provider: 'anthropic', btnId: 'test-anthropic-btn', resultId: 'anthropic-result', inputId: 'anthropic-key', label: 'Claude' });
+
   function clearTestResults() {
-    ['ollama-result', 'deepseek-result'].forEach(id => {
+    ['ollama-result', 'deepseek-result', 'openai-result', 'anthropic-result'].forEach(id => {
       const el = document.getElementById(id);
       if (el) {
         el.className = 'connection-result';
@@ -1304,6 +1456,8 @@
     const host = document.getElementById('ollama-host')?.value?.trim() || 'localhost';
     const port = parseInt(document.getElementById('ollama-port')?.value, 10) || 11434;
     const apiKey = document.getElementById('deepseek-key')?.value?.trim() || '';
+    const openaiApiKey = document.getElementById('openai-key')?.value?.trim() || '';
+    const anthropicApiKey = document.getElementById('anthropic-key')?.value?.trim() || '';
     const maxContextTokens = parseInt(document.getElementById('max-context-tokens')?.value, 10) || 16384;
 
     try {
@@ -1312,6 +1466,8 @@
         ollamaHost: host,
         ollamaPort: port,
         deepseekApiKey: apiKey,
+        openaiApiKey,
+        anthropicApiKey,
         maxContextTokens,
       });
 

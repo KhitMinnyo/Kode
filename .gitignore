@@ -24,9 +24,21 @@ Thumbs.db
 # Logs
 *.log
 npm-debug.log*
-# Environment
+# Environment / secrets
 .env
 .env.local
-# App data (user-specific)
+.env.*.local
+*.pem
+*.key
+id_rsa*
+# App data (user-specific) — normally lives outside the repo in Electron's userData
+# dir, but ignored here too in case it's ever created/tested inside the project folder
 kode-chats.json
 kode-projects.json
+kode-settings.json
+# Local persistent-memory / knowledge-base data (per-project "brain" storage, written
+# to <project>/.kode/memory.json by the save_memory/recall_memory tools) — this is
+# personal working data, not something that should end up in a public repo
+.kode/
+# Test coverage output
+coverage/

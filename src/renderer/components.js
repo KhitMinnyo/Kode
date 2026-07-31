@@ -13,6 +13,12 @@
     read_file:       { icon: '📄', css: 'tool-read',      label: 'Read File' },
     run_command:     { icon: '⌨️', css: 'tool-command',   label: 'Run Command' },
     list_directory:  { icon: '📂', css: 'tool-directory', label: 'List Directory' },
+    http_request:    { icon: '🌐', css: 'tool-http',      label: 'HTTP Request' },
+    search_files:    { icon: '🔍', css: 'tool-search',    label: 'Search Files' },
+    firecrawl_scrape:{ icon: '🕸️', css: 'tool-scrape',    label: 'Scrape Page' },
+    web_search:      { icon: '🔎', css: 'tool-search',    label: 'Web Search' },
+    save_memory:     { icon: '🧠', css: 'tool-memory',    label: 'Save Memory' },
+    recall_memory:   { icon: '🧠', css: 'tool-memory',    label: 'Recall Memory' },
   };
 
   /**
@@ -54,24 +60,46 @@
     });
   }
 
+  // Force every link DOMPurify lets through to open safely — without this, a
+  // rendered <a> from scraped web content or a malicious page could navigate the
+  // whole Electron window itself (see main.js's will-navigate guard for the other
+  // half of this protection) or silently drop window.opener into a new tab.
+  if (typeof DOMPurify !== 'undefined') {
+    DOMPurify.addHook('afterSanitizeAttributes', (node) => {
+      if (node.tagName === 'A') {
+        node.setAttribute('target', '_blank');
+        node.setAttribute('rel', 'noopener noreferrer');
+      }
+    });
+  }
+
   /**
    * Render markdown string → HTML, then apply hljs & code-block wrappers.
    * Returns an element ready to be inserted into the DOM.
+   *
+   * SECURITY: assistant messages can contain content pulled from arbitrary web pages
+   * (firecrawl_scrape, web_search) or project files — none of it is trustworthy, so
+   * marked's HTML output is always run through DOMPurify before touching innerHTML.
+   * If DOMPurify failed to load for some reason, we fail SAFE (render as plain text)
+   * rather than ever inserting unsanitized HTML.
    */
   function renderMarkdown(text) {
     const div = document.createElement('div');
     div.className = 'markdown-body';
 
-    // Configure marked for safe rendering
-    if (typeof marked !== 'undefined') {
+    if (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
       marked.setOptions({
         breaks: true,
         gfm: true,
         headerIds: false,
         mangle: false,
       });
-      div.innerHTML = marked.parse(text || '');
+      const rawHtml = marked.parse(text || '');
+      div.innerHTML = DOMPurify.sanitize(rawHtml);
     } else {
+      if (typeof DOMPurify === 'undefined') {
+        console.error('[Kode] DOMPurify failed to load — rendering as plain text instead of risking unsanitized HTML.');
+      }
       div.textContent = text || '';
     }
 
@@ -207,7 +235,7 @@
 
     const subtitle = document.createElement('div');
     subtitle.className = 'welcome-subtitle';
-    subtitle.textContent = 'Your AI Coding Agent — Powered by Ollama';
+    subtitle.textContent = 'Your AI Coding & Security Agent — Local Ollama or Cloud (OpenAI, Claude, DeepSeek)';
 
     const prompts = document.createElement('div');
     prompts.className = 'welcome-prompts';

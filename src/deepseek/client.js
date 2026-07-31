@@ -128,7 +128,10 @@ class DeepSeekClient {
             } catch {
               errorMsg = errorBody;
             }
-            reject(new Error(`DeepSeek API error (${res.statusCode}): ${errorMsg}`));
+            const err = new Error(`DeepSeek API error (${res.statusCode}): ${errorMsg}`);
+            err.statusCode = res.statusCode;
+            err.retryAfter = res.headers['retry-after'];
+            reject(err);
           });
           return;
         }
@@ -223,6 +226,24 @@ class DeepSeekClient {
 
       req.end();
     });
+  }
+
+  /** Same 429-retry behavior as OpenAIClient — see its _streamRequestWithRetry for rationale. */
+  async _streamRequestWithRetry(method, urlPath, body, onData, opts) {
+    const MAX_RETRIES = 1;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this._streamRequest(method, urlPath, body, onData, opts);
+      } catch (err) {
+        if (err.statusCode === 429 && attempt < MAX_RETRIES) {
+          const waitMs = err.retryAfter ? parseInt(err.retryAfter, 10) * 1000 : 2000;
+          console.warn(`[DeepSeekClient] Rate limited (429) — retrying in ${waitMs}ms`);
+          await new Promise((resolve) => setTimeout(resolve, waitMs));
+          continue;
+        }
+        throw err;
+      }
+    }
   }
 
   /**
@@ -335,9 +356,16 @@ class DeepSeekClient {
       model,
       messages,
       stream: true,
-      temperature: 0.7,
+      temperature: opts.temperature !== undefined ? opts.temperature : 0.7,
       max_tokens: 2048,
     };
+    if (Array.isArray(opts.tools) && opts.tools.length > 0) {
+      requestBody.tools = opts.tools;
+    }
+
+    // Same incremental-fragment accumulation as OpenAIClient — DeepSeek's API is
+    // OpenAI-compatible, including how streamed tool_calls arrive in pieces.
+    const toolCallAccumulator = {};
 
     // First-token timeout: reasoning models can take minutes to think
     const FIRST_TOKEN_TIMEOUT = 300000; // 5 minutes
@@ -350,7 +378,7 @@ class DeepSeekClient {
 
     try {
       let chunkCount = 0;
-      await this._streamRequest('POST', '/v1/chat/completions', requestBody, (chunk) => {
+      await this._streamRequestWithRetry('POST', '/v1/chat/completions', requestBody, (chunk) => {
         chunkCount++;
         // Debug: log first chunk structure
         if (chunkCount === 1) {
@@ -360,6 +388,23 @@ class DeepSeekClient {
         // OpenAI-compatible SSE: chunk.choices[0].delta.content
         if (chunk.choices && chunk.choices.length > 0) {
           const delta = chunk.choices[0].delta;
+
+          if (delta && Array.isArray(delta.tool_calls)) {
+            for (const tc of delta.tool_calls) {
+              const idx = tc.index ?? 0;
+              if (!toolCallAccumulator[idx]) {
+                toolCallAccumulator[idx] = { id: tc.id || '', function: { name: '', arguments: '' } };
+              }
+              if (tc.id) toolCallAccumulator[idx].id = tc.id;
+              if (tc.function?.name) toolCallAccumulator[idx].function.name += tc.function.name;
+              if (tc.function?.arguments) toolCallAccumulator[idx].function.arguments += tc.function.arguments;
+            }
+            if (!firstTokenTime) {
+              firstTokenTime = Date.now();
+              clearTimeout(firstTokenTimeout);
+            }
+          }
+
           if (delta && delta.content !== undefined && delta.content !== null) {
             const token = delta.content;
             // Skip truly empty tokens but count them for timeout purposes
@@ -417,10 +462,8 @@ class DeepSeekClient {
       this._abortController = null;
     }
 
-    // toolCalls is always empty here — DeepSeek support is kept to the plain-text
-    // ```tool``` block convention (parsed by AgentCore) for now, matching OllamaClient's
-    // return shape so AgentCore can treat both providers identically.
-    return { text: fullResponse, toolCalls: [] };
+    const toolCalls = Object.values(toolCallAccumulator).map((tc) => ({ function: { name: tc.function.name, arguments: tc.function.arguments } }));
+    return { text: fullResponse, toolCalls };
   }
 
   /**

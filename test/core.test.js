@@ -73,6 +73,21 @@ test('convertNativeToolCalls skips entries with no function name', () => {
   assert.deepEqual(convertNativeToolCalls([{ function: {} }, {}]), []);
 });
 
+test('AgentCore tracks its active provider, defaulting to ollama', async () => {
+  const mockClient = { getContextSize: async () => 8192 };
+  const core = new AgentCore(mockClient);
+  assert.equal(core.provider, 'ollama');
+
+  core.setProvider('anthropic');
+  assert.equal(core.provider, 'anthropic');
+
+  core.setProvider(); // falsy input should be a no-op, not clear the provider
+  assert.equal(core.provider, 'anthropic');
+
+  const coreWithProvider = new AgentCore(mockClient, 16384, 'openai');
+  assert.equal(coreWithProvider.provider, 'openai');
+});
+
 test('AgentCore.setMaxContextCap updates the cap and ignores invalid input', async () => {
   const mockClient = { getContextSize: async () => 8192 };
   const core = new AgentCore(mockClient, 16384);
@@ -98,6 +113,25 @@ test('AgentCore._getContextSize caches per model and respects the configured cap
   assert.equal(size1, 16384);
   assert.equal(size2, 16384);
   assert.equal(calls, 1, 'second call for the same model should hit the cache');
+});
+
+test('_getContextSize only applies maxContextCap for the ollama provider, not cloud providers', async () => {
+  const mockClient = { getContextSize: async () => 200000 };
+
+  const ollamaCore = new AgentCore(mockClient, 16384, 'ollama');
+  assert.equal(await ollamaCore._getContextSize('some-model'), 16384, 'ollama should still be capped for local RAM/VRAM reasons');
+
+  const claudeCore = new AgentCore(mockClient, 16384, 'anthropic');
+  assert.equal(await claudeCore._getContextSize('claude-sonnet-5'), 200000, 'cloud providers should get their full reported context, uncapped');
+});
+
+test('setProvider clears the context-size cache so a stale capped/uncapped value is not reused', async () => {
+  const mockClient = { getContextSize: async () => 200000 };
+  const core = new AgentCore(mockClient, 16384, 'ollama');
+
+  assert.equal(await core._getContextSize('model-a'), 16384);
+  core.setProvider('anthropic');
+  assert.equal(await core._getContextSize('model-a'), 200000, 'switching provider should invalidate the old cached (capped) value');
 });
 
 test('_buildContextMessages keeps all history when it fits the budget', async () => {

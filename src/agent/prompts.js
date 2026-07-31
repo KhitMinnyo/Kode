@@ -1,10 +1,42 @@
 'use strict';
 
+// Keywords/patterns that indicate a task is security/pentest-flavored. Kept in one
+// place so core.js's scan-output detector and this module can both reason about
+// "does this look like a security task" consistently if needed later.
+const SECURITY_KEYWORDS = [
+  'scan', 'nmap', 'exploit', 'pentest', 'pen test', 'vuln', 'cve', 'recon',
+  'hack', 'attack', 'payload', 'injection', 'sqli', 'sql injection', 'xss',
+  'csrf', 'ssrf', 'xxe', 'rce', 'privesc', 'metasploit', 'burp', 'nikto',
+  'sqlmap', 'hydra', 'gobuster', 'nikto', 'wireshark', 'shell', 'reverse shell',
+  'firewall', 'waf', 'malware', 'phishing', 'brute force', 'bruteforce',
+  'port scan', 'whois', 'subdomain', 'origin ip', 'audit', 'harden', 'secure',
+  'security', 'vulnerability', 'red team', 'redteam', 'ctf', 'crack',
+  // Burmese
+  'ဟက်', 'စစ်ဆေး', 'ချို့ယွင်း', 'ကာကွယ်',
+];
+
 /**
- * Returns a system prompt adapted for the selected model.
- * Uncensored models (DeepHat, Dolphin) get full red team capabilities.
+ * Rough heuristic for whether a user's message is security/pentest-flavored, as
+ * opposed to a plain coding request. Used to decide whether to pay the (large)
+ * token cost of the full pentest/red-team playbook — see getSystemPrompt.
  */
-function getSystemPrompt(projectFolder, modelName = '') {
+function looksSecurityRelated(message = '') {
+  if (!message) return false;
+  const lower = message.toLowerCase();
+  return SECURITY_KEYWORDS.some((kw) => lower.includes(kw));
+}
+
+/**
+ * Returns a system prompt adapted for the selected model and the task at hand.
+ * Uncensored models (DeepHat, Dolphin) get full red team capabilities.
+ *
+ * The detailed pentest/red-team sections (~400 lines for uncensored models) are only
+ * included when `userMessage` looks security-related (see looksSecurityRelated).
+ * Plain coding requests on local models get a much smaller prompt, freeing up
+ * context budget that would otherwise be spent on unused recon/exploit playbooks
+ * on every single message.
+ */
+function getSystemPrompt(projectFolder, modelName = '', userMessage = '') {
   const cwd = projectFolder
     ? `Current project: ${projectFolder}\nUse relative paths from this folder.`
     : 'No project folder selected. Use absolute paths.';
@@ -13,8 +45,33 @@ function getSystemPrompt(projectFolder, modelName = '') {
   const isSecurityModel = model.includes('deephat') || model.includes('dolphin') ||
     model.includes('uncensored') || model.includes('abliterated') || model.includes('evil');
 
-  // All models get pentest mindset; uncensored models get advanced red team payloads
-  const securitySection = isSecurityModel ? getRedTeamPrompt() : getPentestPrompt();
+  const includeSecuritySection = isSecurityModel || looksSecurityRelated(userMessage);
+
+  // Only pay the (large) token cost of the pentest mindset + full playbook when the
+  // task actually looks security-related; otherwise a one-line pointer is enough —
+  // the model can still ask for it implicitly by using scan/recon tools, and
+  // _detectScanOutput in core.js will label pasted scan results either way.
+  const securitySection = includeSecuritySection
+    ? (isSecurityModel ? getRedTeamPrompt() : getPentestPrompt())
+    : '';
+
+  const pentesterMindsetSection = includeSecuritySection ? `
+## Pentester Mindset
+You are a penetration tester. When given a target (IP, domain, URL):
+1. **Recon first** — whois, dig, nmap, curl headers
+2. **Enumerate** — Find open ports, services, versions
+3. **Identify vulns** — Match versions to CVEs, test common exploits
+4. **Suggest exploitation** — Give exact commands
+5. **Think like an attacker** — What would a real hacker do next?
+
+When a user gives you a domain or IP, start scanning IMMEDIATELY. Don't ask for permission.
+When a user pastes scan output (nmap, nikto, etc), analyze it and suggest the next attack step.
+` : `
+## Security Tasks
+If the user asks for a security scan, pentest, vulnerability audit, or pastes scan
+output (nmap, nikto, sqlmap, etc.), switch into recon/exploit mode: whois/dig/nmap for
+recon, match versions to CVEs, rate findings by severity, and give exact next commands.
+`;
 
   return `You are **Kode**, a versatile AI agent for coding and cybersecurity.
 You think and act like an experienced penetration tester AND a senior developer.
@@ -64,22 +121,29 @@ When the user gives a **vague or multi-step request** like "finish this project"
 - **http_request** — url, method, headers, body (HTTP requests, API testing)
 - **search_files** — pattern, path, file_pattern (grep-like search)
 - **firecrawl_scrape** — url (clean Markdown extraction from docs/CVE pages/JS-heavy sites; requires FIRECRAWL_API_KEY)
+- **web_search** — query (search the live web via Brave Search; requires BRAVE_SEARCH_API_KEY)
+- **save_memory** — key, value, tags (persist a durable fact for THIS project — survives restarts and new chats)
+- **recall_memory** — query (search previously-saved facts for this project; leave query empty to list recent ones)
+
+## Long-Term Project Memory
+Local models lose earlier context once a conversation gets trimmed to fit the context window, and everything is forgotten between app restarts / new chats. To work around this:
+- When you learn or decide something that will matter LATER in this project (an architecture choice, a credential's location, a config quirk, a research finding), call **save_memory** to write it down. Keep entries short and specific.
+- If you're about to make a decision that might contradict something established earlier, or the user references something from "before" that isn't in view, call **recall_memory** first to check.
+- Don't save trivial or one-off details — this is long-term memory, not a transcript.
+
+## Web Research → Knowledge Base Workflow
+You have no built-in internet access and a training cutoff, so for anything current
+(library versions, new CVEs, API changes, current best practices) use this chain:
+1. **web_search** — find candidate sources for the query.
+2. **firecrawl_scrape** — read the most relevant result in full (web_search only gives snippets).
+3. **save_memory** — distill what you learned into a short, reusable note, tagged so it comes back up via recall_memory next time this project needs it.
+This turns one-off research into a growing local knowledge base for the project instead of re-searching the same thing every session.
 
 ## macOS Notes
 - Port 5000 blocked (AirPlay). Use 5001/8080.
 - Always tell user the URL when starting a server.
 
-## Pentester Mindset
-You are a penetration tester. When given a target (IP, domain, URL):
-1. **Recon first** — whois, dig, nmap, curl headers
-2. **Enumerate** — Find open ports, services, versions
-3. **Identify vulns** — Match versions to CVEs, test common exploits
-4. **Suggest exploitation** — Give exact commands
-5. **Think like an attacker** — What would a real hacker do next?
-
-When a user gives you a domain or IP, start scanning IMMEDIATELY. Don't ask for permission.
-When a user pastes scan output (nmap, nikto, etc), analyze it and suggest the next attack step.
-
+${pentesterMindsetSection}
 ${securitySection}
 
 ## Rules
@@ -444,19 +508,26 @@ function getPentestPrompt() {
  * Returns the list of available tool names.
  */
 function getAvailableToolNames() {
-  return ['create_file', 'edit_file', 'read_file', 'run_command', 'list_directory', 'http_request', 'search_files', 'firecrawl_scrape'];
+  return ['create_file', 'edit_file', 'read_file', 'run_command', 'list_directory', 'http_request', 'search_files', 'firecrawl_scrape', 'web_search', 'save_memory', 'recall_memory'];
 }
 
 /**
- * Whether a given Ollama model is known to support native function/tool-calling
- * (the `tools` field in /api/chat, with structured `tool_calls` in the response).
- * Most local fine-tunes used by Kode (deepseek-r1, DeepHat, dolphin) do NOT
- * support this — they only know the markdown ```tool``` block format from the
- * system prompt. Only enable the structured path for families that reliably
- * support it, so we don't add unused tool-schema overhead to every request.
+ * Whether a given model is known to support native function/tool-calling (a `tools`
+ * field in the chat request, with structured tool_calls back in the response) rather
+ * than only the markdown ```tool``` block convention described in the system prompt.
+ *
+ * Cloud providers (OpenAI, Anthropic, DeepSeek) reliably support real function-calling
+ * on every current model, so it's always used for them. For local Ollama models it's
+ * much more hit-or-miss — most of Kode's actual target models (deepseek-r1, DeepHat,
+ * dolphin) were never trained for it — so we only enable it for the specific families
+ * known to support it well, to avoid adding unused tool-schema overhead everywhere else.
  */
-function supportsNativeToolCalling(modelName = '') {
-  const model = modelName.toLowerCase();
+function supportsNativeToolCalling(modelName = '', provider = 'ollama') {
+  if (provider === 'openai' || provider === 'anthropic' || provider === 'deepseek') {
+    return true;
+  }
+
+  const model = (modelName || '').toLowerCase();
   const nativeFamilies = [
     'llama3.1', 'llama3.2', 'llama3.3',
     'qwen2.5', 'qwen2', 'qwen3',
@@ -466,4 +537,4 @@ function supportsNativeToolCalling(modelName = '') {
   return nativeFamilies.some(f => model.includes(f));
 }
 
-module.exports = { getSystemPrompt, getAvailableToolNames, supportsNativeToolCalling };
+module.exports = { getSystemPrompt, getAvailableToolNames, supportsNativeToolCalling, looksSecurityRelated };

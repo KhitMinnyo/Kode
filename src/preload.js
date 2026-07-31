@@ -161,4 +161,19 @@ contextBridge.exposeInMainWorld('kode', {
 
   /** Test connection to a provider without saving. */
   testConnection: (params) => ipcRenderer.invoke('test-connection', params),
+
+  // ─── Persistent Memory APIs ──────────────────────────────────────────────
+
+  /**
+   * List saved long-term memory entries for the active project.
+   * @returns {Promise<{success: boolean, entries?: Array, projectPath?: string, error?: string}>}
+   */
+  listMemory: () => ipcRenderer.invoke('list-memory'),
+
+  /**
+   * Delete a memory entry by key from the active project's memory store.
+   * @param {string} key
+   * @returns {Promise<{success: boolean, error?: string}>}
+   */
+  deleteMemoryEntry: (key) => ipcRenderer.invoke('delete-memory', key),
 });

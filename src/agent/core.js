@@ -2,6 +2,7 @@
 
 const { getSystemPrompt, getAvailableToolNames, supportsNativeToolCalling } = require('./prompts');
 const tools = require('./tools');
+const memory = require('./memory');
 const { TOOL_SCHEMAS } = tools;
 
 const MAX_TOOL_ITERATIONS = 15;  // Allow multi-step task execution
@@ -164,7 +165,7 @@ class AgentCore {
   /**
    * @param {import('../ollama/client')} ollamaClient
    */
-  constructor(ollamaClient, maxContextCap = 16384) {
+  constructor(ollamaClient, maxContextCap = 16384, provider = 'ollama') {
     if (!ollamaClient) {
       throw new Error('OllamaClient instance is required');
     }
@@ -173,6 +174,19 @@ class AgentCore {
     this._contextSizeCache = {};  // model → context_size cache
     this.maxContextCap = maxContextCap; // user-configurable ceiling, see setMaxContextCap()
     this._contextSummaryCache = {};  // conversation fingerprint → { droppedCount, summary }
+    // Which backend `this.ollamaClient` currently points at: 'ollama' | 'deepseek' |
+    // 'openai' | 'anthropic'. Despite the property name (kept for backward
+    // compatibility), it holds whichever client main.js's getActiveClient() selected.
+    this.provider = provider;
+  }
+
+  /** Update which provider `this.ollamaClient` represents — call this any time main.js swaps the active client. */
+  setProvider(provider) {
+    if (!provider || provider === this.provider) return;
+    this.provider = provider;
+    // The cap-vs-no-cap logic in _getContextSize depends on the provider, so a
+    // cached value from before the switch could be stale (or wrongly capped/uncapped).
+    this._contextSizeCache = {};
   }
 
   /**
@@ -189,21 +203,25 @@ class AgentCore {
   }
 
   /**
-   * Get the model's maximum context window size (cached after first lookup), capped at
-   * `this.maxContextCap` (default 16384, user-configurable in Settings — raise it for
-   * large-context local models like Qwen3.6's 256K window, provided your hardware has the
-   * RAM/VRAM for it). This is the ceiling used for history-budgeting (_buildContextMessages)
-   * — the actual num_ctx sent to Ollama per-request is chosen separately by bucketNumCtx()
-   * based on how many tokens are really needed, so most requests use far less than this ceiling.
+   * Get the model's maximum context window size (cached after first lookup).
+   *
+   * `this.maxContextCap` (default 16384, user-configurable in Settings) is ONLY applied
+   * for the `ollama` provider — it exists to protect local RAM/VRAM from an oversized
+   * KV cache, which has no equivalent for cloud APIs. Cloud providers (OpenAI, Anthropic,
+   * DeepSeek) bill by token but don't have that local memory-pressure problem, so capping
+   * them the same way just silently throws away most of e.g. Claude's 200K or GPT's 128K
+   * window for no benefit. This is the ceiling used for history-budgeting
+   * (_buildContextMessages) — the actual num_ctx sent to Ollama per-request is chosen
+   * separately by bucketNumCtx() based on how many tokens are really needed.
    */
   async _getContextSize(model) {
     if (this._contextSizeCache[model]) {
       return this._contextSizeCache[model];
     }
     const rawSize = await this.ollamaClient.getContextSize(model);
-    const size = Math.min(rawSize, this.maxContextCap);
+    const size = this.provider === 'ollama' ? Math.min(rawSize, this.maxContextCap) : rawSize;
     this._contextSizeCache[model] = size;
-    console.log(`[AgentCore] Model "${model}" context: ${rawSize} (capped to ${size})`);
+    console.log(`[AgentCore] Model "${model}" (${this.provider}) context: ${rawSize}${size !== rawSize ? ` (capped to ${size})` : ''}`);
     return size;
   }
 
@@ -523,11 +541,30 @@ ${newlyDroppedText}`;
         }
       }
 
+      // Auto-recall relevant long-term project memory (see agent/memory.js) — this is
+      // what lets the model "remember" facts saved via save_memory in earlier sessions
+      // even after they've long since been trimmed out of / were never in this
+      // conversation's context. Only injects when something actually matches, so it
+      // doesn't add noise to every single message.
+      if (projectFolder) {
+        try {
+          const recalled = memory.searchMemory(projectFolder, userMessage, 3);
+          if (recalled.length > 0) {
+            enrichedMessage = `${enrichedMessage}\n\n[Relevant project memory — recalled automatically]\n${memory.formatMemoryEntries(recalled)}`;
+            console.log(`[AgentCore] Auto-recalled ${recalled.length} memory entr${recalled.length === 1 ? 'y' : 'ies'}`);
+          }
+        } catch (err) {
+          console.warn('[AgentCore] Memory auto-recall failed:', err.message);
+        }
+      }
+
       // Add user message to history
       conversationHistory.push({ role: 'user', content: enrichedMessage });
 
-      // Build messages array with system prompt prepended (model-aware for security models)
-      const systemMessage = { role: 'system', content: getSystemPrompt(projectFolder, model) };
+      // Build messages array with system prompt prepended (model-aware for security
+      // models, and message-aware so the large pentest/red-team playbook is only
+      // included when this task actually looks security-related — see prompts.js).
+      const systemMessage = { role: 'system', content: getSystemPrompt(projectFolder, model, userMessage) };
 
       let iteration = 0;
       let finalResponse = '';
@@ -560,7 +597,7 @@ ${newlyDroppedText}`;
         // Native Ollama function-calling is only reliable on a handful of model families;
         // everyone else keeps using the markdown ```tool``` block convention from the
         // system prompt (parsed by parseToolCalls below).
-        const useNativeTools = supportsNativeToolCalling(model);
+        const useNativeTools = supportsNativeToolCalling(model, this.provider);
 
         console.log(`[AgentCore] Iteration ${iteration}: ${messages.length} messages, ~${neededTokens} tokens (num_ctx: ${numCtx}/${maxContextSize}, native tools: ${useNativeTools})`);
 

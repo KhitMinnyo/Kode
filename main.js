@@ -1,12 +1,15 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, dialog, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, nativeImage, shell, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
 const OllamaClient = require('./src/ollama/client');
 const DeepSeekClient = require('./src/deepseek/client');
+const OpenAIClient = require('./src/openai/client');
+const AnthropicClient = require('./src/anthropic/client');
 const AgentCore = require('./src/agent/core');
+const memoryStore = require('./src/agent/memory');
 
 // ─── Globals ─────────────────────────────────────────────────────────────────
 
@@ -17,11 +20,55 @@ let activeProjectIndex = -1;
 // ─── Settings ────────────────────────────────────────────────────────────────
 const SETTINGS_FILE = path.join(app.getPath('userData'), 'kode-settings.json');
 
+// These hold API keys, so they're encrypted at rest via Electron's safeStorage
+// (OS keychain on macOS, libsecret/kwallet on Linux, DPAPI on Windows) rather than
+// written to disk as plaintext JSON.
+const SECRET_FIELDS = ['deepseekApiKey', 'openaiApiKey', 'anthropicApiKey'];
+
+/**
+ * Encrypts a secret for on-disk storage. Falls back to storing it in plaintext
+ * (matching the app's previous behavior) if safeStorage's OS-level backend isn't
+ * available — e.g. some minimal Linux setups without a keyring daemon — rather than
+ * failing to save the key at all.
+ */
+function encryptSecret(value) {
+  if (!value) return '';
+  try {
+    if (safeStorage.isEncryptionAvailable()) {
+      return { __enc: true, data: safeStorage.encryptString(value).toString('base64') };
+    }
+    console.warn('[Settings] OS-level encryption is not available on this system — API key will be stored in plaintext.');
+  } catch (err) {
+    console.warn('[Settings] Encryption failed, storing key in plaintext:', err.message);
+  }
+  return value;
+}
+
+/** Reverses encryptSecret(); also transparently accepts old plaintext-format settings files. */
+function decryptSecret(stored) {
+  if (!stored) return '';
+  if (typeof stored === 'string') return stored; // legacy plaintext, or the plaintext fallback above
+  if (stored && stored.__enc && stored.data) {
+    try {
+      return safeStorage.decryptString(Buffer.from(stored.data, 'base64'));
+    } catch (err) {
+      console.warn('[Settings] Failed to decrypt a stored API key (may need to be re-entered):', err.message);
+      return '';
+    }
+  }
+  return '';
+}
+
 function loadSettings() {
   try {
     if (fs.existsSync(SETTINGS_FILE)) {
       const data = fs.readFileSync(SETTINGS_FILE, 'utf-8');
-      return { ...getDefaultSettings(), ...JSON.parse(data) };
+      const onDisk = JSON.parse(data);
+      const decrypted = { ...onDisk };
+      for (const field of SECRET_FIELDS) {
+        decrypted[field] = decryptSecret(onDisk[field]);
+      }
+      return { ...getDefaultSettings(), ...decrypted };
     }
   } catch (err) {
     console.error('Failed to load settings:', err.message);
@@ -31,17 +78,29 @@ function loadSettings() {
 
 function getDefaultSettings() {
   return {
-    provider: 'ollama',          // 'ollama' or 'deepseek'
+    provider: 'ollama',          // 'ollama' | 'deepseek' | 'openai' | 'anthropic'
     ollamaHost: 'localhost',     // Ollama server hostname/IP
     ollamaPort: 11434,           // Ollama server port
     deepseekApiKey: '',          // DeepSeek API key
+    openaiApiKey: '',            // OpenAI (ChatGPT) API key
+    anthropicApiKey: '',         // Anthropic (Claude) API key
     maxContextTokens: 16384,     // Context-size ceiling; raise for large-context models (e.g. Qwen3.6)
   };
 }
 
+/**
+ * Persists settings to disk with API keys encrypted. Takes a plain (all-string)
+ * settings object and does NOT mutate it — callers keep holding plaintext keys in
+ * memory (needed to pass to the client constructors / show in the Settings UI);
+ * only the on-disk copy is transformed.
+ */
 function saveSettings(newSettings) {
   try {
-    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(newSettings, null, 2), 'utf-8');
+    const toDisk = { ...newSettings };
+    for (const field of SECRET_FIELDS) {
+      toDisk[field] = encryptSecret(newSettings[field]);
+    }
+    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(toDisk, null, 2), 'utf-8');
   } catch (err) {
     console.error('Failed to save settings:', err.message);
   }
@@ -54,13 +113,20 @@ function buildOllamaUrl(host, port) {
 let appSettings = loadSettings();
 let ollamaClient = new OllamaClient(buildOllamaUrl(appSettings.ollamaHost, appSettings.ollamaPort));
 let deepseekClient = new DeepSeekClient(appSettings.deepseekApiKey || '');
+let openaiClient = new OpenAIClient(appSettings.openaiApiKey || '');
+let anthropicClient = new AnthropicClient(appSettings.anthropicApiKey || '');
 
 // Active client depends on provider setting
 function getActiveClient() {
-  return appSettings.provider === 'deepseek' ? deepseekClient : ollamaClient;
+  switch (appSettings.provider) {
+    case 'deepseek': return deepseekClient;
+    case 'openai': return openaiClient;
+    case 'anthropic': return anthropicClient;
+    default: return ollamaClient;
+  }
 }
 
-const agentCore = new AgentCore(ollamaClient, appSettings.maxContextTokens);
+const agentCore = new AgentCore(ollamaClient, appSettings.maxContextTokens, appSettings.provider);
 
 // ─── Chat Storage ────────────────────────────────────────────────────────────
 const CHATS_FILE = path.join(app.getPath('userData'), 'kode-chats.json');
@@ -124,6 +190,13 @@ function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).substring(2, 8);
 }
 
+/** Returns the currently active project's folder path, or null if none is active. */
+function getActiveProjectFolder() {
+  return activeProjectIndex >= 0 && projects[activeProjectIndex]
+    ? projects[activeProjectIndex].path
+    : null;
+}
+
 // ─── Window Creation ─────────────────────────────────────────────────────────
 
 function createMainWindow() {
@@ -147,6 +220,28 @@ function createMainWindow() {
 
   // Load the renderer HTML
   mainWindow.loadFile(path.join(__dirname, 'src', 'renderer', 'index.html'));
+
+  // Security: rendered assistant messages can contain links from arbitrary web
+  // content (firecrawl_scrape/web_search results), and DOMPurify forces them to
+  // target="_blank". Without these guards, Electron would either try to open a new
+  // BrowserWindow pointed at attacker-controlled content, or (for a same-window
+  // link) navigate the whole app away from index.html. Route link clicks to the
+  // user's real browser instead, and block any other in-app navigation entirely.
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith('https://') || url.startsWith('http://')) {
+      shell.openExternal(url);
+    }
+    return { action: 'deny' };
+  });
+
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (!url.startsWith('file://')) {
+      event.preventDefault();
+      if (url.startsWith('https://') || url.startsWith('http://')) {
+        shell.openExternal(url);
+      }
+    }
+  });
 
   // Show window when content is ready
   mainWindow.once('ready-to-show', () => {
@@ -195,6 +290,36 @@ function registerIPCHandlers() {
   });
 
   /**
+   * List saved long-term memory entries for the active project.
+   */
+  ipcMain.handle('list-memory', async () => {
+    const activeFolder = getActiveProjectFolder();
+    if (!activeFolder) return { success: false, error: 'No active project', entries: [] };
+    try {
+      const data = memoryStore.loadMemory(activeFolder);
+      return { success: true, entries: data.entries || [], projectPath: activeFolder };
+    } catch (err) {
+      console.error('[IPC:list-memory] Error:', err.message);
+      return { success: false, error: err.message, entries: [] };
+    }
+  });
+
+  /**
+   * Delete a single memory entry by key from the active project's memory store.
+   */
+  ipcMain.handle('delete-memory', async (event, key) => {
+    const activeFolder = getActiveProjectFolder();
+    if (!activeFolder) return { success: false, error: 'No active project' };
+    try {
+      const ok = memoryStore.deleteMemoryEntry(activeFolder, key);
+      return { success: ok };
+    } catch (err) {
+      console.error('[IPC:delete-memory] Error:', err.message);
+      return { success: false, error: err.message };
+    }
+  });
+
+  /**
    * Send a message to the agent with streaming support.
    * Streams tokens and tool executions back to the renderer via events.
    */
@@ -208,9 +333,7 @@ function registerIPCHandlers() {
 
     try {
         // Get active project folder for tool execution
-        const activeFolder = activeProjectIndex >= 0 && projects[activeProjectIndex]
-          ? projects[activeProjectIndex].path
-          : null;
+        const activeFolder = getActiveProjectFolder();
 
         const result = await agentCore.processMessage(
           message,
@@ -545,11 +668,14 @@ function registerIPCHandlers() {
       // Reconfigure Ollama client with new host
       ollamaClient.updateBaseUrl(buildOllamaUrl(appSettings.ollamaHost, appSettings.ollamaPort));
 
-      // Reconfigure DeepSeek client with new API key
+      // Reconfigure cloud clients with their (possibly new) API keys
       deepseekClient.updateApiKey(appSettings.deepseekApiKey || '');
+      openaiClient.updateApiKey(appSettings.openaiApiKey || '');
+      anthropicClient.updateApiKey(appSettings.anthropicApiKey || '');
 
-      // Update AgentCore's client reference based on provider
+      // Update AgentCore's client reference + provider tag based on the selected provider
       agentCore.ollamaClient = getActiveClient();
+      agentCore.setProvider(appSettings.provider);
 
       // Apply the (possibly changed) context-size ceiling
       agentCore.setMaxContextCap(appSettings.maxContextTokens);
@@ -564,17 +690,16 @@ function registerIPCHandlers() {
   /**
    * Test connection to a specific host (without saving)
    */
-  ipcMain.handle('test-connection', async (event, { provider, ollamaHost, ollamaPort, deepseekApiKey }) => {
+  ipcMain.handle('test-connection', async (event, { provider, ollamaHost, ollamaPort, deepseekApiKey, openaiApiKey, anthropicApiKey }) => {
     try {
-      if (provider === 'deepseek') {
-        const testClient = new DeepSeekClient(deepseekApiKey || '');
-        const status = await testClient.checkConnection();
-        return status;
-      } else {
-        const testClient = new OllamaClient(buildOllamaUrl(ollamaHost, ollamaPort));
-        const status = await testClient.checkConnection();
-        return status;
+      let testClient;
+      switch (provider) {
+        case 'deepseek': testClient = new DeepSeekClient(deepseekApiKey || ''); break;
+        case 'openai': testClient = new OpenAIClient(openaiApiKey || ''); break;
+        case 'anthropic': testClient = new AnthropicClient(anthropicApiKey || ''); break;
+        default: testClient = new OllamaClient(buildOllamaUrl(ollamaHost, ollamaPort));
       }
+      return await testClient.checkConnection();
     } catch (err) {
       return { connected: false, error: err.message };
     }
