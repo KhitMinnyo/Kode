@@ -261,8 +261,15 @@ async function read_file(params, projectFolder) {
 /**
  * Tool: run_command
  * Executes a shell command with a 30-second timeout and returns the output.
+ *
+ * @param {object} toolContext - Optional, injected by AgentCore (see agent/core.js).
+ *   toolContext.confirmRiskyCommand(command, label) => boolean|Promise<boolean>, called
+ *   before a "risky but allowed" pattern (see below) executes. When omitted/not a
+ *   function — as in every other tool call, and in the default case where the user has
+ *   turned Settings → Safety off — risky commands run exactly as before: auto-allowed
+ *   with just a warning label, no confirmation step.
  */
-async function run_command(params, projectFolder) {
+async function run_command(params, projectFolder, toolContext = {}) {
   const { command } = params;
 
   if (!command || typeof command !== 'string') {
@@ -300,9 +307,10 @@ async function run_command(params, projectFolder) {
 
   // Warn-but-allow tier: patterns that are legitimate in red-team/pentest workflows
   // (e.g. fetching and running a recon script on a Kali box) but are also a classic
-  // remote-code-execution shape. We can't gate these on a real user confirmation
-  // without new IPC plumbing between the agent loop and the UI, so instead we run
-  // them but make sure the risk is visible in the tool result the model/user sees.
+  // remote-code-execution shape. Always labeled with a risk note in the result; when
+  // Settings → Safety → "confirm risky commands" is on (the default — see
+  // toolContext.confirmRiskyCommand below), execution also pauses for user approval
+  // instead of running automatically.
   const riskyButAllowed = [
     { pattern: /curl[^|]*\|\s*(sudo\s+)?(ba)?sh\b/i, label: 'piping a downloaded script directly into a shell' },
     { pattern: /wget[^|]*\|\s*(sudo\s+)?(ba)?sh\b/i, label: 'piping a downloaded script directly into a shell' },
@@ -310,10 +318,25 @@ async function run_command(params, projectFolder) {
     { pattern: /eval\s*\(\s*(curl|wget)/i, label: 'evaluating remotely-fetched code' },
   ];
   let riskWarning = '';
-  for (const { pattern, label } of riskyButAllowed) {
-    if (pattern.test(command)) {
-      riskWarning = `⚠️ Risk note: this command involves ${label} — review it carefully before trusting the output.\n\n`;
+  let matchedRisky = null;
+  for (const entry of riskyButAllowed) {
+    if (entry.pattern.test(command)) {
+      matchedRisky = entry;
+      riskWarning = `⚠️ Risk note: this command involves ${entry.label} — review it carefully before trusting the output.\n\n`;
       break;
+    }
+  }
+
+  if (matchedRisky && typeof toolContext.confirmRiskyCommand === 'function') {
+    let approved;
+    try {
+      approved = await toolContext.confirmRiskyCommand(command, matchedRisky.label);
+    } catch (err) {
+      console.warn('[run_command] confirmRiskyCommand callback threw, failing safe (deny):', err.message);
+      approved = false;
+    }
+    if (!approved) {
+      return `🚫 Blocked: user declined to approve this command (${matchedRisky.label}).\nCommand: ${command}`;
     }
   }
 

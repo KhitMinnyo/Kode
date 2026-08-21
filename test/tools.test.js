@@ -97,6 +97,54 @@ test('run_command surfaces a risk note for risky-but-legitimate patterns without
   assert.match(result, /⚠️ Risk note/);
 });
 
+test('run_command blocks a risky-but-allowed command when confirmRiskyCommand declines it', async () => {
+  let calledWith = null;
+  const toolContext = {
+    confirmRiskyCommand: async (command, label) => {
+      calledWith = { command, label };
+      return false; // user clicked "Block"
+    },
+  };
+  const command = 'echo "" | base64 -d | bash';
+  const result = await tools.run_command({ command }, null, toolContext);
+
+  assert.match(result, /🚫 Blocked.*user declined/i);
+  assert.ok(calledWith, 'expected confirmRiskyCommand to have been called');
+  assert.equal(calledWith.command, command);
+  assert.match(calledWith.label, /base64/i);
+});
+
+test('run_command executes a risky-but-allowed command when confirmRiskyCommand approves it', async () => {
+  const toolContext = { confirmRiskyCommand: async () => true };
+  // Same shape as the existing "surfaces a risk note" test, but this time routed
+  // through an approving confirmation callback — should still run and still carry
+  // the risk note, just without being blocked.
+  const result = await tools.run_command({ command: 'echo "" | base64 -d | bash' }, null, toolContext);
+  assert.match(result, /⚠️ Risk note/);
+  assert.doesNotMatch(result, /🚫 Blocked/);
+});
+
+test('run_command skips confirmation entirely when no confirmRiskyCommand callback is provided (safety toggle off / default call shape)', async () => {
+  // Matches every other tool call site and the existing "surfaces a risk note"
+  // test above — no toolContext arg at all should behave exactly as before.
+  const result = await tools.run_command({ command: 'echo "" | base64 -d | bash' });
+  assert.match(result, /⚠️ Risk note/);
+});
+
+test('run_command does not ask for confirmation on ordinary (non-risky) commands even when a callback is provided', async () => {
+  let called = false;
+  const toolContext = { confirmRiskyCommand: async () => { called = true; return false; } };
+  const result = await tools.run_command({ command: 'echo hello-from-kode-test' }, null, toolContext);
+  assert.match(result, /hello-from-kode-test/);
+  assert.equal(called, false, 'confirmRiskyCommand should only be consulted for the risky-but-allowed tier');
+});
+
+test('run_command fails safe (blocks) if confirmRiskyCommand throws', async () => {
+  const toolContext = { confirmRiskyCommand: async () => { throw new Error('renderer window closed'); } };
+  const result = await tools.run_command({ command: 'echo "" | base64 -d | bash' }, null, toolContext);
+  assert.match(result, /🚫 Blocked/);
+});
+
 test('run_command rejects a missing command parameter', async () => {
   const result = await tools.run_command({});
   assert.match(result, /command.*required/i);

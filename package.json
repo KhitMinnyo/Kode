@@ -2,7 +2,7 @@
   "name": "kode",
   "version": "1.1.0",
   "description": "Kode — AI Coding & Cybersecurity Agent powered by Ollama",
-  "repository": "https://github.com/user/kode",
+  "repository": "https://github.com/KhitMinnyo/Kode",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -12,13 +12,15 @@
     "build:zip": "electron-builder --mac zip",
     "build:linux": "electron-builder --linux",
     "build:deb": "electron-builder --linux deb",
-    "test": "node --test \"test/**/*.test.js\""
+    "test": "node --test \"test/**/*.test.js\"",
+    "lint": "eslint . --ext .js"
   },
   "author": "Kode",
   "license": "MIT",
   "devDependencies": {
     "electron": "^42.5.0",
-    "electron-builder": "^26.15.3"
+    "electron-builder": "^26.15.3",
+    "eslint": "^8.57.0"
   },
   "build": {
     "appId": "com.kode.agent",
@@ -35,7 +37,10 @@
         }
       ],
       "darkModeSupport": true,
-      "hardenedRuntime": false
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist"
     },
     "dmg": {
       "title": "Kode",

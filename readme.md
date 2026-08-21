@@ -38,6 +38,10 @@
 - **Chat history** — Per-project and standalone chats
 - **Chat management** — Rename, delete, switch between chats
 
+### 🛡️ Safety
+- **Destructive-command blocking** — `run_command` refuses known-catastrophic patterns (`rm -rf /`, fork bombs, raw-disk overwrites, etc.) outright.
+- **Risky-command confirmation** — Patterns that are legitimate in a pentest workflow but also a classic RCE shape (piping a downloaded script into a shell, decoding-and-executing base64, etc.) pause and ask you to approve or block before running. On by default; toggle it off in Settings → Safety if you fully trust the model/target and want it to run autonomously.
+
 ## 📋 Requirements
 
 - **macOS** 12+ (Monterey or later)
@@ -79,6 +83,33 @@ npm run build
 # Output: dist/Kode-1.1.0-arm64.dmg (Apple Silicon)
 #         dist/Kode-1.1.0-x64.dmg   (Intel)
 ```
+
+### Tests & Linting
+```bash
+npm test   # runs test/**/*.test.js (node:test)
+npm run lint   # ESLint over main.js + src/
+```
+CI (`.github/workflows/build-linux.yml`, `build-mac.yml`) runs `npm test` before every build, so a broken build is never packaged or released.
+
+### Code Signing & Notarization (macOS)
+A build produced without an Apple Developer certificate is unsigned and will trigger
+Gatekeeper's "unidentified developer" warning for anyone but you. `package.json`'s
+`build.mac` config already sets `hardenedRuntime: true` and points at
+`build/entitlements.mac.plist`, which is everything electron-builder needs to sign and
+notarize automatically — it just needs credentials. Either locally or as GitHub Actions
+repo secrets, set:
+
+| Variable | What it is |
+|---|---|
+| `CSC_LINK` | Base64 (or file path) of your Developer ID Application `.p12` certificate |
+| `CSC_KEY_PASSWORD` | Password for that `.p12` |
+| `APPLE_ID` | Apple ID used for notarization |
+| `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password for that Apple ID ([generate one](https://support.apple.com/en-us/102654)) |
+| `APPLE_TEAM_ID` | Your Apple Developer Team ID |
+
+With those set, `npm run build` / the `build-mac.yml` workflow sign and notarize
+automatically — no other config changes needed. Without them, builds still work
+(unsigned/ad-hoc-signed), which is fine for local testing on your own machine.
 
 ## 🏗️ Project Structure
 
@@ -138,4 +169,4 @@ This tool is designed for **authorized security testing** and **educational purp
 
 ## 📄 License
 
-MIT License
+MIT License — see [LICENSE](LICENSE).

@@ -146,6 +146,82 @@ test('_buildContextMessages keeps all history when it fits the budget', async ()
   assert.equal(messages[0], systemMessage);
 });
 
+test('processMessage threads onConfirmCommand through to a risky run_command tool call', async () => {
+  // A model name/provider combo that does NOT trigger native tool-calling (see
+  // prompts.js's supportsNativeToolCalling), so the agent parses the markdown
+  // ```tool``` block convention below instead of expecting a structured tool_calls
+  // response from the mock client.
+  let chatCallCount = 0;
+  const mockClient = {
+    getContextSize: async () => 8192,
+    abort() {},
+    chat: async () => {
+      chatCallCount++;
+      if (chatCallCount === 1) {
+        // First turn: the model asks to run a risky-but-allowed command.
+        return {
+          text: '```tool\n{"tool": "run_command", "params": {"command": "echo \\"\\" | base64 -d | bash"}}\n```',
+          toolCalls: [],
+        };
+      }
+      // Second turn: after seeing the (blocked) tool result, the model just replies.
+      return { text: 'Understood, I will not run that.', toolCalls: [] };
+    },
+  };
+
+  const core = new AgentCore(mockClient, 8192, 'ollama');
+  const confirmCalls = [];
+  const onConfirmCommand = async (command, label) => {
+    confirmCalls.push({ command, label });
+    return false; // simulate the user clicking "Block" in the renderer modal
+  };
+
+  const result = await core.processMessage(
+    'please run that recon script',
+    'test-model',
+    [],
+    () => {},          // onToken
+    () => {},          // onToolExecution
+    null,               // projectFolder
+    () => {},          // onStatus
+    onConfirmCommand
+  );
+
+  assert.equal(confirmCalls.length, 1, 'expected the confirmation callback to be consulted exactly once');
+  assert.match(confirmCalls[0].command, /base64/);
+  assert.match(confirmCalls[0].label, /base64/i);
+
+  const runCommandResult = result.toolResults.find(t => t.tool === 'run_command');
+  assert.ok(runCommandResult, 'expected a run_command tool result');
+  assert.match(runCommandResult.result, /🚫 Blocked.*user declined/i);
+});
+
+test('processMessage never consults onConfirmCommand when it is not provided (default/safety-off shape)', async () => {
+  let chatCallCount = 0;
+  const mockClient = {
+    getContextSize: async () => 8192,
+    abort() {},
+    chat: async () => {
+      chatCallCount++;
+      if (chatCallCount === 1) {
+        return {
+          text: '```tool\n{"tool": "run_command", "params": {"command": "echo hi"}}\n```',
+          toolCalls: [],
+        };
+      }
+      return { text: 'Done.', toolCalls: [] };
+    },
+  };
+
+  const core = new AgentCore(mockClient, 8192, 'ollama');
+  // No onConfirmCommand arg at all — matches main.js when the Safety toggle is off.
+  const result = await core.processMessage('run echo hi', 'test-model', [], () => {}, () => {}, null, () => {});
+
+  const runCommandResult = result.toolResults.find(t => t.tool === 'run_command');
+  assert.ok(runCommandResult, 'expected a run_command tool result');
+  assert.doesNotMatch(runCommandResult.result, /🚫 Blocked/);
+});
+
 test('_buildContextMessages falls back to a tool-name note when summarization fails', async () => {
   const mockClient = {
     getContextSize: async () => 2048,

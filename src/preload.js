@@ -210,4 +210,29 @@ contextBridge.exposeInMainWorld('kode', {
     ipcRenderer.on('process-start', handler);
     return () => ipcRenderer.removeListener('process-start', handler);
   },
+
+  // ─── Risky Command Confirmation ──────────────────────────────────────────
+  // When Settings → Safety → "confirm risky commands" is on, run_command pauses on
+  // its risky-but-allowed patterns (curl|sh, base64->sh, etc.) and asks here before
+  // executing — see main.js's makeConfirmCommandCallback.
+
+  /**
+   * Register a callback for when the agent wants to run a risky command and needs
+   * approval. Respond with respondConfirmCommand(requestId, approved).
+   * @param {function({requestId: string, command: string, label: string}): void} callback
+   * @returns {function(): void} Cleanup function to remove the listener
+   */
+  onConfirmCommandRequest: (callback) => {
+    const handler = (_event, data) => callback(data);
+    ipcRenderer.on('confirm-command-request', handler);
+    return () => ipcRenderer.removeListener('confirm-command-request', handler);
+  },
+
+  /**
+   * Answer a pending confirm-command-request.
+   * @param {string} requestId
+   * @param {boolean} approved
+   * @returns {Promise<{success: boolean, error?: string}>}
+   */
+  respondConfirmCommand: (requestId, approved) => ipcRenderer.invoke('confirm-command-response', { requestId, approved }),
 });

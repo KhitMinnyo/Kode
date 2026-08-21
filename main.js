@@ -18,6 +18,13 @@ let mainWindow = null;
 let projects = [];         // Array of { path, name }
 let activeProjectIndex = -1;
 
+// Outstanding "please confirm this risky command" round-trips to the renderer, keyed
+// by requestId. See the 'confirm-command-request'/'confirm-command-response' pair
+// below and src/agent/tools.js's run_command.
+const pendingCommandConfirmations = new Map(); // requestId -> resolve(approved: boolean)
+let commandConfirmationCounter = 0;
+const CONFIRM_COMMAND_TIMEOUT_MS = 2 * 60 * 1000; // fail safe (deny) if nobody answers
+
 // ─── Settings ────────────────────────────────────────────────────────────────
 const SETTINGS_FILE = path.join(app.getPath('userData'), 'kode-settings.json');
 
@@ -86,6 +93,7 @@ function getDefaultSettings() {
     openaiApiKey: '',            // OpenAI (ChatGPT) API key
     anthropicApiKey: '',         // Anthropic (Claude) API key
     maxContextTokens: 16384,     // Context-size ceiling; raise for large-context models (e.g. Qwen3.6)
+    confirmRiskyCommands: true,  // Pause run_command's "risky but allowed" tier (curl|sh, base64->sh, etc.) for user approval — see src/agent/tools.js
   };
 }
 
@@ -198,6 +206,40 @@ function getActiveProjectFolder() {
     : null;
 }
 
+/**
+ * Builds the onConfirmCommand callback threaded into AgentCore.processMessage for a
+ * single send-message call, or null when the user has turned the safety toggle off
+ * (in which case run_command's risky-but-allowed tier runs exactly as before —
+ * auto-allowed with just a warning label).
+ *
+ * Sends a 'confirm-command-request' event to the renderer and waits for the matching
+ * 'confirm-command-response' IPC call (see registerIPCHandlers below). If the window
+ * is gone or nobody responds within CONFIRM_COMMAND_TIMEOUT_MS, fails safe by denying
+ * the command rather than hanging the agent loop forever.
+ */
+function makeConfirmCommandCallback(sender) {
+  if (!appSettings.confirmRiskyCommands) return null;
+
+  return (command, label) => {
+    if (sender.isDestroyed()) return Promise.resolve(false);
+
+    const requestId = String(++commandConfirmationCounter);
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        pendingCommandConfirmations.delete(requestId);
+        resolve(false);
+      }, CONFIRM_COMMAND_TIMEOUT_MS);
+
+      pendingCommandConfirmations.set(requestId, (approved) => {
+        clearTimeout(timer);
+        resolve(approved);
+      });
+
+      sender.send('confirm-command-request', { requestId, command, label });
+    });
+  };
+}
+
 // ─── Window Creation ─────────────────────────────────────────────────────────
 
 function createMainWindow() {
@@ -215,7 +257,11 @@ function createMainWindow() {
       preload: path.join(__dirname, 'src', 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      // Electron's OS-level renderer sandbox. Safe to enable here: preload.js only
+      // touches contextBridge/ipcRenderer (both sandbox-compatible), and the renderer
+      // itself never uses Node APIs directly — everything goes through the
+      // window.kode bridge. See https://www.electronjs.org/docs/latest/tutorial/sandbox
+      sandbox: true,
     },
   });
 
@@ -406,7 +452,11 @@ function registerIPCHandlers() {
             if (!sender.isDestroyed()) {
               sender.send('agent-status', statusUpdate);
             }
-          }
+          },
+          // onConfirmCommand callback — ask the renderer to approve/block a risky
+          // run_command pattern before it executes (null/skipped when the user has
+          // turned the Settings → Safety toggle off).
+          makeConfirmCommandCallback(sender)
         );
 
       // Notify renderer that streaming is complete
@@ -482,6 +532,19 @@ function registerIPCHandlers() {
       console.error('[IPC:stop-generation] Error:', err.message);
       return { success: false, error: err.message };
     }
+  });
+
+  /**
+   * Renderer's answer to a 'confirm-command-request' event (see
+   * makeConfirmCommandCallback above) — resolves the matching pending Promise that
+   * run_command is awaiting before it runs a risky-but-allowed command.
+   */
+  ipcMain.handle('confirm-command-response', (event, { requestId, approved }) => {
+    const resolve = pendingCommandConfirmations.get(requestId);
+    if (!resolve) return { success: false, error: 'No pending confirmation for this requestId (it may have already timed out).' };
+    pendingCommandConfirmations.delete(requestId);
+    resolve(!!approved);
+    return { success: true };
   });
 
   // ─── Chat History Handlers ──────────────────────────────────────────────────

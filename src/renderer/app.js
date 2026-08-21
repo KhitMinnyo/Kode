@@ -114,6 +114,7 @@
     setupSettingsListeners();
     setupMemoryListeners();
     setupProcessesListeners();
+    setupCommandConfirmListener();
     await checkConnection();
     await loadModels();
     await loadProjectFolder();
@@ -1394,6 +1395,47 @@
   }
 
   /* ==========================================================
+     Risky Command Confirmation Modal
+     (shown when Settings → Safety → confirm-risky-commands is on
+     and the agent wants to run a "risky but allowed" run_command
+     pattern — see src/agent/tools.js / main.js's
+     makeConfirmCommandCallback)
+     ========================================================== */
+  function setupCommandConfirmListener() {
+    const overlay = document.getElementById('command-confirm-overlay');
+    const labelEl = document.getElementById('command-confirm-label');
+    const textEl = document.getElementById('command-confirm-text');
+    const blockBtn = document.getElementById('command-confirm-block-btn');
+    const allowBtn = document.getElementById('command-confirm-allow-btn');
+    if (!overlay || !window.kode.onConfirmCommandRequest) return;
+
+    let activeRequestId = null;
+
+    const respond = (approved) => {
+      if (!activeRequestId) return;
+      const requestId = activeRequestId;
+      activeRequestId = null;
+      overlay.classList.remove('active');
+      window.kode.respondConfirmCommand(requestId, approved).catch(() => {});
+    };
+
+    if (blockBtn) blockBtn.addEventListener('click', () => respond(false));
+    if (allowBtn) allowBtn.addEventListener('click', () => respond(true));
+    // No overlay-click / Escape-to-dismiss on purpose — an accidental dismiss must
+    // never be silently treated as "allow" for a command that pipes/executes remote
+    // content. Block/Allow are the only two ways out of this modal.
+
+    window.kode.onConfirmCommandRequest(({ requestId, command, label }) => {
+      activeRequestId = requestId;
+      if (labelEl) labelEl.textContent = `⚠️ The agent wants to run a command involving ${label}. Review it before allowing.`;
+      // textContent (not innerHTML) — command text is untrusted (model/tool output)
+      // and must never be interpreted as HTML.
+      if (textEl) textEl.textContent = command;
+      overlay.classList.add('active');
+    });
+  }
+
+  /* ==========================================================
      Settings Modal
      ========================================================== */
   function setupSettingsListeners() {
@@ -1484,6 +1526,7 @@
       const openaiKeyInput = document.getElementById('openai-key');
       const anthropicKeyInput = document.getElementById('anthropic-key');
       const contextInput = document.getElementById('max-context-tokens');
+      const confirmRiskyInput = document.getElementById('confirm-risky-commands');
 
       if (hostInput) hostInput.value = settings.ollamaHost || 'localhost';
       if (portInput) portInput.value = settings.ollamaPort || 11434;
@@ -1491,6 +1534,7 @@
       if (openaiKeyInput) openaiKeyInput.value = settings.openaiApiKey || '';
       if (anthropicKeyInput) anthropicKeyInput.value = settings.anthropicApiKey || '';
       if (contextInput) contextInput.value = String(settings.maxContextTokens || 16384);
+      if (confirmRiskyInput) confirmRiskyInput.checked = settings.confirmRiskyCommands !== false;
 
       switchProviderTab(settings.provider || 'ollama');
     } catch (err) {
@@ -1630,6 +1674,7 @@
     const openaiApiKey = document.getElementById('openai-key')?.value?.trim() || '';
     const anthropicApiKey = document.getElementById('anthropic-key')?.value?.trim() || '';
     const maxContextTokens = parseInt(document.getElementById('max-context-tokens')?.value, 10) || 16384;
+    const confirmRiskyCommands = document.getElementById('confirm-risky-commands')?.checked !== false;
 
     try {
       const result = await window.kode.saveSettings({
@@ -1640,6 +1685,7 @@
         openaiApiKey,
         anthropicApiKey,
         maxContextTokens,
+        confirmRiskyCommands,
       });
 
       if (result.success) {

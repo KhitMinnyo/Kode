@@ -222,6 +222,21 @@
           </div>
         </div>
 
+        <!-- Safety -->
+        <div class="settings-group">
+          <div class="settings-group-title">
+            <span class="group-icon">🛡️</span>
+            Safety
+          </div>
+          <div class="settings-field settings-field-checkbox">
+            <label class="checkbox-label" for="confirm-risky-commands">
+              <input type="checkbox" id="confirm-risky-commands" checked />
+              <span>Ask before running risky commands</span>
+            </label>
+            <span class="field-hint">💡 When the agent wants to run something risky (e.g. piping a downloaded script into a shell, decoding-and-executing base64), pause and ask you to approve or block it first instead of running it automatically. Recommended — turn off only if you fully trust the model and target.</span>
+          </div>
+        </div>
+
         <!-- Ollama Config -->
         <div class="provider-config active" id="config-ollama">
           <div class="settings-group">
@@ -369,6 +384,33 @@
       <div class="settings-footer">
         <button class="settings-cancel-btn" id="processes-refresh-btn">↻ Refresh</button>
         <button class="settings-save-btn" id="processes-close-btn-2">Close</button>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ============== Risky Command Confirmation Modal ============== -->
+  <!-- Shown when the agent wants to run a "risky but allowed" run_command pattern
+       (see src/agent/tools.js) and Settings → Safety → confirm-risky-commands is on.
+       No overlay-click-to-dismiss / no Escape shortcut on purpose — accidentally
+       closing this must never be treated as "allow". -->
+  <div class="settings-overlay" id="command-confirm-overlay">
+    <div class="settings-modal command-confirm-modal">
+
+      <div class="settings-header">
+        <h2>⚠️ Confirm Risky Command</h2>
+      </div>
+
+      <div class="settings-body">
+        <div class="settings-group">
+          <span class="field-hint" id="command-confirm-label"></span>
+        </div>
+        <pre class="command-confirm-command"><code id="command-confirm-text"></code></pre>
+      </div>
+
+      <div class="settings-footer">
+        <button class="settings-cancel-btn" id="command-confirm-block-btn">🚫 Block</button>
+        <button class="confirm-allow-btn" id="command-confirm-allow-btn">▶ Allow Once</button>
       </div>
 
     </div>

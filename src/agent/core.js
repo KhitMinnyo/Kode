@@ -507,9 +507,14 @@ ${newlyDroppedText}`;
    * @param {function({tool: string, params: object, result: string}): void} onToolExecution - Called when a tool is executed
    * @param {string|null} projectFolder - Active project folder path
    * @param {function({status: string, message: string, data?: object}): void} onStatus - Called with status updates
+   * @param {?function(string, string): (boolean|Promise<boolean>)} onConfirmCommand - Called with
+   *   (command, label) before a run_command "risky but allowed" pattern executes; should resolve to
+   *   true/false. Pass null (or omit) to skip confirmation entirely — e.g. when the user has turned
+   *   the Settings → Safety toggle off — in which case run_command behaves exactly as before
+   *   (auto-allowed with just a warning label). See src/agent/tools.js's run_command.
    * @returns {Promise<{response: string, toolResults: Array<{tool: string, params: object, result: string}>}>}
    */
-  async processMessage(userMessage, model, conversationHistory, onToken = () => {}, onToolExecution = () => {}, projectFolder = null, onStatus = () => {}) {
+  async processMessage(userMessage, model, conversationHistory, onToken = () => {}, onToolExecution = () => {}, projectFolder = null, onStatus = () => {}, onConfirmCommand = null) {
     if (!userMessage || typeof userMessage !== 'string') {
       throw new Error('User message is required');
     }
@@ -684,6 +689,10 @@ ${newlyDroppedText}`;
         // Execute each tool call
         const availableTools = getAvailableToolNames();
         const toolResultParts = [];
+        // Extra context passed as a 3rd arg to tool handlers. Currently only
+        // run_command reads it (confirmRiskyCommand) — every other handler ignores
+        // the extra argument, so this is safe to pass uniformly.
+        const toolContext = { confirmRiskyCommand: onConfirmCommand };
 
         for (const call of toolCalls) {
           if (!this._isGenerating) break;
@@ -698,7 +707,7 @@ ${newlyDroppedText}`;
           } else {
             const handler = tools[call.tool];
             try {
-              result = await handler(call.params, projectFolder);
+              result = await handler(call.params, projectFolder, toolContext);
             } catch (err) {
               result = `❌ Tool execution error (${call.tool}): ${err.message}`;
             }

@@ -1,0 +1,46 @@
+{
+  "root": true,
+  "env": {
+    "node": true,
+    "es2022": true
+  },
+  "parserOptions": {
+    "ecmaVersion": 2022,
+    "sourceType": "script"
+  },
+  "extends": "eslint:recommended",
+  "rules": {
+    "no-unused-vars": ["warn", { "args": "none", "varsIgnorePattern": "^_" }],
+    "no-console": "off",
+    "no-empty": ["warn", { "allowEmptyCatch": true }]
+  },
+  "overrides": [
+    {
+      "files": ["src/renderer/**/*.js"],
+      "env": {
+        "node": false,
+        "browser": true
+      },
+      "globals": {
+        "window": "readonly",
+        "document": "readonly",
+        "marked": "readonly",
+        "hljs": "readonly",
+        "DOMPurify": "readonly"
+      }
+    },
+    {
+      "files": ["src/preload.js"],
+      "env": {
+        "node": true,
+        "browser": true
+      }
+    },
+    {
+      "files": ["test/**/*.test.js"],
+      "env": {
+        "node": true
+      }
+    }
+  ]
+}
