@@ -5,7 +5,11 @@ const tools = require('./tools');
 const memory = require('./memory');
 const { TOOL_SCHEMAS } = tools;
 
-const MAX_TOOL_ITERATIONS = 15;  // Allow multi-step task execution
+// Allow multi-step task execution. Bumped from 15: with write_plan encouraging explicit
+// step tracking and git_checkpoint/git_revert making mistakes cheap to undo, longer
+// multi-file tasks (the ones local models most need help staying on track for) were
+// hitting the old ceiling before finishing.
+const MAX_TOOL_ITERATIONS = 25;
 
 // Buckets for the num_ctx we actually request from Ollama. Rather than always asking
 // for the model's full (capped) context window — which forces Ollama to allocate a
@@ -60,6 +64,20 @@ function parseToolCalls(responseText) {
   }
 
   return toolCalls;
+}
+
+/**
+ * Counts how many ```tool``` blocks appear in the response, regardless of whether they
+ * parsed successfully. Compared against parseToolCalls(text).length in the agent loop
+ * to detect "the model tried to call a tool but the JSON was unrecoverably broken" —
+ * previously that case was silently indistinguishable from "no tool call was intended
+ * at all", so a malformed call just vanished with no feedback to the model.
+ */
+function countToolBlockAttempts(responseText) {
+  const toolBlockRegex = /```tool\s*\n([\s\S]*?)```/g;
+  let count = 0;
+  while (toolBlockRegex.exec(responseText) !== null) count++;
+  return count;
 }
 
 /**
@@ -676,8 +694,30 @@ ${newlyDroppedText}`;
           ? convertNativeToolCalls(nativeToolCalls)
           : parseToolCalls(currentResponse);
 
+        // How many ```tool``` blocks the model attempted vs how many actually parsed —
+        // only meaningful for the markdown convention (native tool_calls are already
+        // structured, so there's nothing to fail to parse).
+        const attemptedBlocks = nativeToolCalls.length > 0 ? toolCalls.length : countToolBlockAttempts(currentResponse);
+        const malformedBlockCount = attemptedBlocks - toolCalls.length;
+
         if (toolCalls.length === 0) {
-          // No tool calls — we're done
+          if (malformedBlockCount > 0) {
+            // The model clearly TRIED to call a tool (there's a ```tool``` block) but
+            // the JSON was broken beyond what tryParseToolJSON's recovery strategies
+            // could fix. Previously this silently vanished — the model would think its
+            // tool call went through and the conversation would just stall. Instead,
+            // tell it plainly and give it another turn to retry with valid JSON.
+            console.warn(`[AgentCore] ${malformedBlockCount} unparseable tool block(s) at iteration ${iteration} — asking model to retry`);
+            conversationHistory.push({ role: 'assistant', content: currentResponse });
+            conversationHistory.push({
+              role: 'user',
+              content: `Your last message contained a \`\`\`tool\`\`\` block that could not be parsed as valid JSON, so nothing ran. ` +
+                `Resend it as strict JSON on one line: {"tool": "name", "params": {...}}. ` +
+                `Escape any newlines inside string values as \\n and any quotes as \\".`,
+            });
+            continue; // retry
+          }
+          // No tool calls attempted — we're done
           finalResponse = currentResponse;
           conversationHistory.push({ role: 'assistant', content: currentResponse });
           break;
@@ -689,10 +729,16 @@ ${newlyDroppedText}`;
         // Execute each tool call
         const availableTools = getAvailableToolNames();
         const toolResultParts = [];
-        // Extra context passed as a 3rd arg to tool handlers. Currently only
-        // run_command reads it (confirmRiskyCommand) — every other handler ignores
-        // the extra argument, so this is safe to pass uniformly.
-        const toolContext = { confirmRiskyCommand: onConfirmCommand };
+        // Extra context passed as a 3rd arg to tool handlers. Most handlers ignore
+        // whichever of these they don't need, so it's safe to pass all of them
+        // uniformly: confirmRiskyCommand (run_command), ollamaClient/embedClient
+        // (index_codebase, semantic_search — embeddings only make sense against the
+        // local Ollama provider, so embedClient is null for cloud providers).
+        const toolContext = {
+          confirmRiskyCommand: onConfirmCommand,
+          ollamaClient: this.ollamaClient,
+          embedClient: this.provider === 'ollama' ? this.ollamaClient : null,
+        };
 
         for (const call of toolCalls) {
           if (!this._isGenerating) break;
@@ -723,6 +769,16 @@ ${newlyDroppedText}`;
           onToolExecution(toolExecution);
 
           toolResultParts.push(`[Tool Result: ${call.tool}]\n${result}`);
+        }
+
+        // If some (but not all) ```tool``` blocks in this response failed to parse,
+        // the successfully-parsed ones above already ran — but silently dropping the
+        // broken ones would look to the model like they succeeded too. Flag it explicitly.
+        if (malformedBlockCount > 0) {
+          toolResultParts.push(
+            `[Note] ${malformedBlockCount} additional \`\`\`tool\`\`\` block(s) in your last message could not be parsed ` +
+            `as valid JSON and did NOT run. If you still need them, resend as strict one-line JSON.`
+          );
         }
 
         // Add tool results as a "user" message (simulating tool feedback to the LLM)
@@ -777,4 +833,5 @@ module.exports._testUtils = {
   tryParseToolJSON,
   convertNativeToolCalls,
   stripToolBlocks,
+  countToolBlockAttempts,
 };

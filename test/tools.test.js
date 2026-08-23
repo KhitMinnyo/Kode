@@ -230,3 +230,229 @@ test('web_search requires a query parameter', async () => {
   const result = await tools.web_search({});
   assert.match(result, /query.*required/i);
 });
+
+// ─── Git safety-net tools ────────────────────────────────────────────────────
+
+test('git_status reports clearly when the folder is not a git repo yet', async () => {
+  const dir = makeTempDir();
+  const result = await tools.git_status({}, dir);
+  assert.match(result, /not \(inside\) a git repository/i);
+});
+
+test('git_checkpoint auto-initializes a repo and commits everything', async () => {
+  const dir = makeTempDir();
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'hello');
+
+  const result = await tools.git_checkpoint({ message: 'first save' }, dir);
+  assert.match(result, /Initialized a new git repository/i);
+  assert.match(result, /Checkpoint created/);
+  assert.match(result, /first save/);
+
+  // A second checkpoint with no new changes should say there's nothing to do.
+  const second = await tools.git_checkpoint({ message: 'again' }, dir);
+  assert.match(second, /Nothing to checkpoint/);
+});
+
+test('git_status and git_diff reflect changes after a checkpoint', async () => {
+  const dir = makeTempDir();
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'hello');
+  await tools.git_checkpoint({ message: 'init' }, dir);
+
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'hello world');
+  const status = await tools.git_status({}, dir);
+  assert.match(status, /a\.txt/);
+
+  const diff = await tools.git_diff({}, dir);
+  assert.match(diff, /hello world/);
+});
+
+test('git_revert with no params discards uncommitted changes back to the last checkpoint', async () => {
+  const dir = makeTempDir();
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'hello');
+  await tools.git_checkpoint({ message: 'init' }, dir);
+
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'oops, broke it');
+  const result = await tools.git_revert({}, dir);
+  assert.match(result, /Discarded all uncommitted changes/);
+  assert.equal(fs.readFileSync(path.join(dir, 'a.txt'), 'utf-8'), 'hello');
+});
+
+test('git_revert with a file reverts just that file', async () => {
+  const dir = makeTempDir();
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'hello');
+  fs.writeFileSync(path.join(dir, 'b.txt'), 'world');
+  await tools.git_checkpoint({ message: 'init' }, dir);
+
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'changed a');
+  fs.writeFileSync(path.join(dir, 'b.txt'), 'changed b');
+  const result = await tools.git_revert({ file: 'a.txt' }, dir);
+  assert.match(result, /Reverted "a\.txt"/);
+  assert.equal(fs.readFileSync(path.join(dir, 'a.txt'), 'utf-8'), 'hello');
+  assert.equal(fs.readFileSync(path.join(dir, 'b.txt'), 'utf-8'), 'changed b');
+});
+
+test('git_diff and git_revert report clearly when there is no git repo yet', async () => {
+  const dir = makeTempDir();
+  assert.match(await tools.git_diff({}, dir), /not \(inside\) a git repository/i);
+  assert.match(await tools.git_revert({}, dir), /not \(inside\) a git repository/i);
+});
+
+// ─── apply_patch ─────────────────────────────────────────────────────────────
+
+test('apply_patch creates a new file from a /dev/null diff', async () => {
+  const dir = makeTempDir();
+  const patch = [
+    '--- /dev/null',
+    '+++ b/hello.py',
+    '@@ -0,0 +1,2 @@',
+    '+print("hi")',
+    '+print("bye")',
+    '',
+  ].join('\n');
+
+  const result = await tools.apply_patch({ patch }, dir);
+  assert.match(result, /✅ Created hello\.py/);
+  assert.equal(fs.readFileSync(path.join(dir, 'hello.py'), 'utf-8'), 'print("hi")\nprint("bye")');
+});
+
+test('apply_patch modifies an existing file via a single hunk', async () => {
+  const dir = makeTempDir();
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'line1\nline2\nline3\n');
+
+  const patch = [
+    '--- a/a.txt',
+    '+++ b/a.txt',
+    '@@ -1,3 +1,3 @@',
+    ' line1',
+    '-line2',
+    '+line2-changed',
+    ' line3',
+    '',
+  ].join('\n');
+
+  const result = await tools.apply_patch({ patch }, dir);
+  assert.match(result, /✅ Patched a\.txt/);
+  // The original file has a trailing newline — applying the patch should preserve it.
+  assert.equal(fs.readFileSync(path.join(dir, 'a.txt'), 'utf-8'), 'line1\nline2-changed\nline3\n');
+});
+
+test('apply_patch falls back to content-based matching when the hunk line numbers are wrong', async () => {
+  const dir = makeTempDir();
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'x\ny\nz\nline2\nq\n');
+
+  // Hunk claims line2 is at line 1, but it's actually at line 4 — a common local-model mistake.
+  const patch = [
+    '--- a/a.txt',
+    '+++ b/a.txt',
+    '@@ -1,1 +1,1 @@',
+    '-line2',
+    '+line2-changed',
+    '',
+  ].join('\n');
+
+  const result = await tools.apply_patch({ patch }, dir);
+  assert.match(result, /✅ Patched a\.txt/);
+  assert.equal(fs.readFileSync(path.join(dir, 'a.txt'), 'utf-8'), 'x\ny\nz\nline2-changed\nq\n');
+});
+
+test('apply_patch reports a clear per-file error when a hunk cannot be located at all', async () => {
+  const dir = makeTempDir();
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'completely different content\n');
+
+  const patch = [
+    '--- a/a.txt',
+    '+++ b/a.txt',
+    '@@ -1,1 +1,1 @@',
+    '-this text does not exist in the file',
+    '+replacement',
+    '',
+  ].join('\n');
+
+  const result = await tools.apply_patch({ patch }, dir);
+  assert.match(result, /❌ Failed to patch a\.txt/);
+  assert.match(result, /did not match the file's current content/);
+});
+
+test('apply_patch requires a patch parameter', async () => {
+  const result = await tools.apply_patch({}, '/tmp');
+  assert.match(result, /"patch".*required/i);
+});
+
+// ─── run_tests ───────────────────────────────────────────────────────────────
+
+test('run_tests reports success for a passing command', async () => {
+  const dir = makeTempDir();
+  const result = await tools.run_tests({ command: 'echo all-tests-passed' }, dir);
+  assert.match(result, /✅ Tests passed/);
+  assert.match(result, /all-tests-passed/);
+});
+
+test('run_tests reports failure with output for a failing command', async () => {
+  const dir = makeTempDir();
+  const result = await tools.run_tests({ command: 'echo boom 1>&2; exit 1' }, dir);
+  assert.match(result, /❌ Tests failed/);
+  assert.match(result, /boom/);
+});
+
+// ─── write_plan ──────────────────────────────────────────────────────────────
+
+test('write_plan formats a checklist and counts completed steps', async () => {
+  const result = await tools.write_plan({
+    steps: [
+      { text: 'Read the file', status: 'done' },
+      { text: 'Fix the bug', status: 'in_progress' },
+      { text: 'Run tests' },
+    ],
+  });
+  assert.match(result, /1\/3 done/);
+  assert.match(result, /\[x\] Read the file/);
+  assert.match(result, /\[~\] Fix the bug/);
+  assert.match(result, /\[ \] Run tests/);
+});
+
+test('write_plan requires a non-empty steps array', async () => {
+  assert.match(await tools.write_plan({}), /"steps".*required/i);
+  assert.match(await tools.write_plan({ steps: [] }), /"steps".*required/i);
+});
+
+// ─── Semantic search (index_codebase / semantic_search) ─────────────────────
+
+test('index_codebase and semantic_search fail clearly without an embedding-capable client', async () => {
+  const dir = makeTempDir();
+  assert.match(await tools.index_codebase({}, dir, {}), /requires the Ollama provider/);
+  assert.match(await tools.semantic_search({ query: 'auth logic' }, dir, {}), /requires the Ollama provider/);
+});
+
+test('semantic_search requires a query parameter', async () => {
+  const dir = makeTempDir();
+  const fakeClient = { embed: async () => [[1, 0, 0]] };
+  const result = await tools.semantic_search({}, dir, { ollamaClient: fakeClient });
+  assert.match(result, /"query".*required/i);
+});
+
+test('index_codebase and semantic_search round-trip against a fake embedding client', async () => {
+  const dir = makeTempDir();
+  fs.writeFileSync(path.join(dir, 'auth.js'), 'function login(user, pass) { return checkPassword(user, pass); }');
+  fs.writeFileSync(path.join(dir, 'math.js'), 'function add(a, b) { return a + b; }');
+
+  // A tiny fake embedding client: turns text into a crude 2-d vector so files about
+  // "login"/"password" cluster away from files about "add"/"math" — enough to prove
+  // the index→search round trip and cosine ranking work, without needing real Ollama.
+  const fakeClient = {
+    embed: async (model, input) => {
+      const texts = Array.isArray(input) ? input : [input];
+      return texts.map((t) => {
+        const lower = t.toLowerCase();
+        const authScore = (lower.match(/login|password|auth/g) || []).length;
+        const mathScore = (lower.match(/add|math|sum/g) || []).length;
+        return [authScore, mathScore];
+      });
+    },
+  };
+
+  const indexResult = await tools.index_codebase({}, dir, { ollamaClient: fakeClient });
+  assert.match(indexResult, /✅ Indexed 2 files/);
+
+  const searchResult = await tools.semantic_search({ query: 'password' }, dir, { ollamaClient: fakeClient });
+  assert.match(searchResult, /auth\.js/);
+});

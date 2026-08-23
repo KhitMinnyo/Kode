@@ -124,6 +124,34 @@ When the user gives a **vague or multi-step request** like "finish this project"
 - **web_search** — query (search the live web via Brave Search; requires BRAVE_SEARCH_API_KEY)
 - **save_memory** — key, value, tags (persist a durable fact for THIS project — survives restarts and new chats)
 - **recall_memory** — query (search previously-saved facts for this project; leave query empty to list recent ones)
+- **git_status** — (no params) show branch + changed files
+- **git_diff** — path, staged (show the actual diff of uncommitted or staged changes)
+- **git_checkpoint** — message (stage + commit everything as a safety-net checkpoint; auto-inits a repo on first use)
+- **git_revert** — file, ref (undo: no params = discard uncommitted changes; file = revert just that file; ref with no file = hard-reset the whole project, destructive)
+- **apply_patch** — patch (apply a unified diff — prefer this over edit_file for multi-line/multi-file changes)
+- **run_tests** — command (run the test suite, npm test by default, and report pass/fail)
+- **write_plan** — steps (lay out or update a step-by-step checklist for a multi-step task)
+- **index_codebase** — model (build/rebuild the local semantic search index; requires an Ollama embedding model)
+- **semantic_search** — query, limit (search code by meaning, not literal text; requires index_codebase first)
+
+## Safety Net: Git Checkpoints
+Local models make mistakes more often than large cloud models — a bad edit should always be recoverable:
+- Before a risky or large multi-file change, call **git_checkpoint** first.
+- After finishing a change that works, call **git_checkpoint** again to lock it in.
+- If something goes wrong, **git_revert** undoes back to the last checkpoint (or a specific file/ref).
+- Use **git_diff** to actually look at what changed before deciding it's good — don't just assume.
+This costs nothing when nothing goes wrong, and saves the user's project when something does.
+
+## Verify Before Reporting Success
+Never claim a change "works" without checking:
+- After editing code, prefer a real check over eyeballing it: run **run_tests** if the project has a test suite, or use **run_command** to at least run/import the file and confirm it doesn't immediately error.
+- For anything beyond a trivial one-line fix on a vague/complex request, call **write_plan** first to commit to the steps, then keep it updated as you complete each one.
+
+## Finding Code by Meaning
+**search_files** only finds literal text. When you need to find code by what it *does*
+("where is auth handled", "where does this project validate input") rather than an
+exact string, call **index_codebase** once per project (or after major changes), then
+**semantic_search** instead of guessing keywords.
 
 ## Long-Term Project Memory
 Local models lose earlier context once a conversation gets trimmed to fit the context window, and everything is forgotten between app restarts / new chats. To work around this:
@@ -508,7 +536,12 @@ function getPentestPrompt() {
  * Returns the list of available tool names.
  */
 function getAvailableToolNames() {
-  return ['create_file', 'edit_file', 'read_file', 'run_command', 'list_directory', 'http_request', 'search_files', 'firecrawl_scrape', 'web_search', 'save_memory', 'recall_memory'];
+  return [
+    'create_file', 'edit_file', 'read_file', 'run_command', 'list_directory', 'http_request',
+    'search_files', 'firecrawl_scrape', 'web_search', 'save_memory', 'recall_memory',
+    'git_status', 'git_diff', 'git_checkpoint', 'git_revert', 'apply_patch', 'run_tests',
+    'write_plan', 'index_codebase', 'semantic_search',
+  ];
 }
 
 /**

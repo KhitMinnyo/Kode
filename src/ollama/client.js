@@ -422,6 +422,38 @@ class OllamaClient {
   }
 
   /**
+   * Generate an embedding vector for one or more input strings via Ollama's /api/embed
+   * endpoint. Used by src/agent/embeddings.js for semantic codebase search — a small
+   * dedicated embedding model (e.g. `nomic-embed-text`, ~270MB) runs this, not the
+   * chat model, so it stays cheap even on modest hardware.
+   * @param {string} model - An embedding-capable model name (e.g. 'nomic-embed-text').
+   * @param {string|string[]} input - One string or a batch of strings to embed.
+   * @returns {Promise<number[][]>} - One vector per input, in the same order.
+   */
+  async embed(model, input) {
+    if (!model || typeof model !== 'string') {
+      throw new Error('Embedding model name is required');
+    }
+    if (!input || (Array.isArray(input) && input.length === 0)) {
+      throw new Error('Input text is required');
+    }
+
+    const res = await this._request('POST', '/api/embed', { model, input }, { timeout: 60000 });
+
+    if (res.statusCode !== 200) {
+      let detail = res.body;
+      try { detail = JSON.parse(res.body).error || detail; } catch { /* keep raw body */ }
+      throw new Error(`Embedding request failed: HTTP ${res.statusCode} — ${detail}`);
+    }
+
+    const data = JSON.parse(res.body);
+    if (!Array.isArray(data.embeddings)) {
+      throw new Error('Ollama returned no embeddings — is the model an embedding model? (e.g. "ollama pull nomic-embed-text")');
+    }
+    return data.embeddings;
+  }
+
+  /**
    * Preload a model into memory without generating a real response, so the first
    * user message doesn't pay the full disk-load latency. Cheap: num_predict is
    * capped at 1 token. Safe to call speculatively (e.g. when the user picks a

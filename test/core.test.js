@@ -4,7 +4,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
 const AgentCore = require('../src/agent/core');
-const { bucketNumCtx, estimateTokens, parseToolCalls, convertNativeToolCalls, stripToolBlocks } = AgentCore._testUtils;
+const { bucketNumCtx, estimateTokens, parseToolCalls, convertNativeToolCalls, stripToolBlocks, countToolBlockAttempts } = AgentCore._testUtils;
 
 test('bucketNumCtx picks the smallest bucket that fits', () => {
   assert.equal(bucketNumCtx(100, 16384), 2048);
@@ -238,4 +238,63 @@ test('_buildContextMessages falls back to a tool-name note when summarization fa
   const summaryMsg = messages.find(m => m.role === 'system' && m !== systemMessage);
   assert.ok(summaryMsg, 'expected a fallback context note to be injected');
   assert.match(summaryMsg.content, /Previously completed/);
+});
+
+test('countToolBlockAttempts counts ```tool blocks regardless of whether the JSON parses', () => {
+  assert.equal(countToolBlockAttempts('no blocks here'), 0);
+  assert.equal(countToolBlockAttempts('```tool\n{"tool": "read_file", "params": {}}\n```'), 1);
+  assert.equal(countToolBlockAttempts('```tool\nnot even json\n```\n```tool\n{"tool":"x","params":{}}\n```'), 2);
+});
+
+test('processMessage asks the model to retry when a ```tool block is unparseable, instead of silently dropping it', async () => {
+  let chatCallCount = 0;
+  const mockClient = {
+    getContextSize: async () => 8192,
+    abort() {},
+    chat: async () => {
+      chatCallCount++;
+      if (chatCallCount === 1) {
+        // A ```tool block that even the regex-recovery strategies in tryParseToolJSON
+        // can't salvage (no "tool" key at all) — previously this just vanished with
+        // toolCalls.length === 0, ending the turn as if nothing had been attempted.
+        return { text: '```tool\nthis is not json and has no tool field\n```', toolCalls: [] };
+      }
+      if (chatCallCount === 2) {
+        return { text: 'Got it, retrying.\n```tool\n{"tool": "read_file", "params": {"path": "a.py"}}\n```', toolCalls: [] };
+      }
+      return { text: 'Done.', toolCalls: [] };
+    },
+  };
+
+  const core = new AgentCore(mockClient, 8192, 'ollama');
+  const result = await core.processMessage('read a.py', 'test-model', [], () => {}, () => {}, null, () => {});
+
+  // Should have retried (3 chat calls) rather than ending after the first malformed block.
+  assert.equal(chatCallCount, 3);
+  const readResult = result.toolResults.find(t => t.tool === 'read_file');
+  assert.ok(readResult, 'expected read_file to eventually run after the retry');
+});
+
+test('processMessage threads the ollamaClient/embedClient into toolContext for semantic-search tools', async () => {
+  const mockClient = {
+    getContextSize: async () => 8192,
+    abort() {},
+    embed: async () => [[1, 0]],
+    chat: async (model, messages, onChunk, opts) => {
+      // First turn: call semantic_search, which needs toolContext.ollamaClient wired
+      // through from AgentCore for the "requires the Ollama provider" check to pass.
+      if (!messages.some(m => m.role === 'user' && m.content.startsWith('Tool results:'))) {
+        return { text: '```tool\n{"tool": "semantic_search", "params": {"query": "auth"}}\n```', toolCalls: [] };
+      }
+      return { text: 'Done.', toolCalls: [] };
+    },
+  };
+
+  const core = new AgentCore(mockClient, 8192, 'ollama');
+  const result = await core.processMessage('find the auth code', 'test-model', [], () => {}, () => {}, null, () => {});
+
+  const searchResult = result.toolResults.find(t => t.tool === 'semantic_search');
+  assert.ok(searchResult, 'expected semantic_search to have run');
+  // Should NOT hit the "requires the Ollama provider" error, since embedClient was wired through.
+  assert.doesNotMatch(searchResult.result, /requires the Ollama provider/);
 });
