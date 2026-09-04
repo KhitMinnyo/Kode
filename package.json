@@ -71,10 +71,12 @@
       "category": "Development",
       "icon": "icon.png",
       "desktop": {
-        "Name": "Kode",
-        "Comment": "AI Coding & Cybersecurity Agent",
-        "Terminal": "false",
-        "Categories": "Development;Utility;"
+        "entry": {
+          "Name": "Kode",
+          "Comment": "AI Coding & Cybersecurity Agent",
+          "Terminal": "false",
+          "Categories": "Development;Utility;"
+        }
       }
     },
     "deb": {
