@@ -59,7 +59,7 @@ xattr -cr /Applications/Kode.app
 - A coding model pulled: `ollama pull qwen2.5-coder:7b`
 - Optional: `ollama pull nomic-embed-text` for semantic search
 
-### Recommended Models
+### Recommended Ollama Models
 
 | Model | Use case |
 |-------|----------|
@@ -72,6 +72,20 @@ xattr -cr /Applications/Kode.app
 | `llama3.1:8b` | General fallback, fast native tool-calling |
 
 > Security models (DeepHat, Dolphin) unlock the full Red Team prompt. Standard models get basic security features.
+
+### Recommended Cloud Models
+
+| Provider | Model | Use case |
+|----------|-------|----------|
+| DeepSeek | `deepseek-v4-flash` | Fast, low-cost, best all-round pick |
+| DeepSeek | `deepseek-v4-pro` | Harder reasoning tasks |
+| OpenAI | `gpt-5.6-sol` | Flagship — strong coding at a fraction of Astra's cost |
+| OpenAI | `gpt-6-astra` | Top-tier — hardest end-to-end coding/reasoning tasks |
+| Claude | `claude-opus-5` | Complex agentic coding, Anthropic's own recommendation |
+| Claude | `claude-sonnet-5` | Best speed/intelligence balance for everyday use |
+| Other (Custom) | — | Any OpenAI-compatible endpoint — pick whatever model that provider recommends |
+
+> Cloud model names change fast — the Settings dropdown always fetches each provider's live model list, so treat this table as a starting point rather than the final word.
 
 ## 🚀 Quick Start
 

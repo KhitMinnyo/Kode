@@ -8,7 +8,7 @@ const ANTHROPIC_VERSION = '2023-06-01'; // dated API version header; bump if Ant
 // Fallback model list used only if the live /v1/models call fails (e.g. API version
 // mismatch or network issue) — these are the current Claude model strings as of this
 // build; the live endpoint is authoritative whenever it's reachable.
-const FALLBACK_MODELS = ['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5-20251001'];
+const FALLBACK_MODELS = ['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5-20251001', 'claude-fable-5-1'];
 
 class AnthropicClient {
   constructor(apiKey = '') {

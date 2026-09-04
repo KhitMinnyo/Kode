@@ -170,6 +170,12 @@ html, body {
   flex-direction: column;
 }
 
+.logo-title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
 .logo-text h1 {
   font-size: 20px;
   font-weight: 700;
@@ -187,6 +193,23 @@ html, body {
   color: var(--text-muted);
   letter-spacing: 0.5px;
   margin-top: -2px;
+}
+
+.logo-title-row .app-version {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--bg-glass);
+  border: 1px solid var(--border-glass);
+  padding: 1px 6px;
+  border-radius: 999px;
+  letter-spacing: 0.3px;
+  /* Override the gradient text-clip inherited from the h1 sibling context */
+  -webkit-text-fill-color: var(--text-muted);
+  background-clip: border-box;
+  -webkit-background-clip: border-box;
+  animation: none;
+  margin-top: 0;
 }
 
 /* ----- Model Selector ----- */

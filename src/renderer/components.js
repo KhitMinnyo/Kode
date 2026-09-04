@@ -275,12 +275,17 @@
     const opt = document.createElement('option');
     opt.value = model.name;
 
-    const sizeStr = formatFileSize(model.size || 0);
-    const paramCount = model.details && model.details.parameter_size
-      ? ` · ${model.details.parameter_size}`
-      : '';
+    // Cloud/custom-provider models don't report a real file size — the client
+    // always returns 0 for them since there's no local file to measure — so
+    // showing "(0 B)" next to an API-hosted model reads as broken. Only append a
+    // size badge when there's an actual size (i.e. a local Ollama model).
+    const badgeParts = [];
+    if (model.size) badgeParts.push(formatFileSize(model.size));
+    if (model.details && model.details.parameter_size) badgeParts.push(model.details.parameter_size);
 
-    opt.textContent = `${model.name}  (${sizeStr}${paramCount})`;
+    opt.textContent = badgeParts.length > 0
+      ? `${model.name}  (${badgeParts.join(' · ')})`
+      : model.name;
     return opt;
   }
 

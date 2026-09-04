@@ -5,17 +5,25 @@ const https = require('https');
 const DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 const DEFAULT_TIMEOUT = 30000;
 
-// Hardcoded model catalog — DeepSeek has a fixed set of models
+// Hardcoded model catalog — DeepSeek has a fixed set of models.
+//
+// The old names (`deepseek-chat`, `deepseek-coder`, `deepseek-reasoner`) were
+// discontinued by DeepSeek on 2026-07-24 — per their changelog, they spent their
+// last few months as aliases pointing at deepseek-v4-flash's non-thinking/thinking
+// modes before being retired outright. `deepseek-coder` was already folded into
+// `deepseek-chat` back in 2024. Current lineup: deepseek-v4-flash (fast, general
+// purpose) and deepseek-v4-pro (harder reasoning), both with a ~1M-token context
+// window; deepseek-v4-flash-vision-exp is the same Flash model with image input.
 const DEEPSEEK_MODELS = [
-  { name: 'deepseek-chat', description: 'General-purpose chat model', context_length: 64000 },
-  { name: 'deepseek-coder', description: 'Code-specialized model', context_length: 64000 },
-  { name: 'deepseek-reasoner', description: 'Reasoning model (R1)', context_length: 64000 },
+  { name: 'deepseek-v4-flash', description: 'Fast, general-purpose model', context_length: 1000000 },
+  { name: 'deepseek-v4-pro', description: 'Harder reasoning tasks', context_length: 1000000 },
+  { name: 'deepseek-v4-flash-vision-exp', description: 'Flash model with image input (experimental)', context_length: 1000000 },
 ];
 
 const CONTEXT_SIZES = {
-  'deepseek-chat': 64000,
-  'deepseek-coder': 64000,
-  'deepseek-reasoner': 64000,
+  'deepseek-v4-flash': 1000000,
+  'deepseek-v4-pro': 1000000,
+  'deepseek-v4-flash-vision-exp': 1000000,
 };
 
 class DeepSeekClient {
@@ -299,7 +307,7 @@ class DeepSeekClient {
     if (!info) {
       return {
         name: model,
-        details: { context_length: 64000 },
+        details: { context_length: 1000000 },
       };
     }
 
@@ -318,7 +326,7 @@ class DeepSeekClient {
    * @returns {Promise<number>} - Context size in tokens
    */
   async getContextSize(model) {
-    return CONTEXT_SIZES[model] || 64000;
+    return CONTEXT_SIZES[model] || 1000000;
   }
 
   /**

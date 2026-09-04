@@ -57,7 +57,10 @@
         <div class="logo">
           <img class="logo-icon" src="icon.png" alt="Kode" />
           <div class="logo-text">
-            <h1>Kode</h1>
+            <div class="logo-title-row">
+              <h1>Kode</h1>
+              <span class="app-version" id="app-version"></span>
+            </div>
             <span>AI Agent</span>
           </div>
         </div>
@@ -198,6 +201,10 @@
               <span class="tab-icon">🔮</span>
               Claude API
             </button>
+            <button class="provider-tab" data-provider="openrouter" id="tab-openrouter">
+              <span class="tab-icon">🌐</span>
+              OpenRouter
+            </button>
             <button class="provider-tab" data-provider="custom" id="tab-custom">
               <span class="tab-icon">🧩</span>
               Other (Custom)
@@ -332,6 +339,29 @@
             <span>🔍</span> Test API Key
           </button>
           <div class="connection-result" id="anthropic-result"></div>
+        </div>
+
+        <!-- OpenRouter Config — just an API key; base URL is fixed to OpenRouter's
+             endpoint, unlike the generic Custom provider below -->
+        <div class="provider-config" id="config-openrouter">
+          <div class="settings-group">
+            <div class="settings-group-title">
+              <span class="group-icon">🔑</span>
+              OpenRouter
+            </div>
+            <div class="settings-field">
+              <label for="openrouter-key">API Key</label>
+              <div class="api-key-wrapper">
+                <input type="password" id="openrouter-key" placeholder="sk-or-..." />
+                <button class="api-key-toggle" id="toggle-openrouter-key-vis" title="Toggle visibility">👁</button>
+              </div>
+              <span class="field-hint">🔗 Get your API key from <strong>openrouter.ai/keys</strong> — one key, hundreds of models (Claude, GPT, Llama, DeepSeek, and more) with usage-based pricing.</span>
+            </div>
+          </div>
+          <button class="test-connection-btn" id="test-openrouter-btn">
+            <span>🔍</span> Test API Key
+          </button>
+          <div class="connection-result" id="openrouter-result"></div>
         </div>
 
         <!-- Custom (Other OpenAI-compatible API) Config -->

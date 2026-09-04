@@ -115,6 +115,7 @@
     setupMemoryListeners();
     setupProcessesListeners();
     setupCommandConfirmListener();
+    loadAppVersion();
     await checkConnection();
     await loadModels();
     await loadProjectFolder();
@@ -123,6 +124,21 @@
 
     // Retry connection check every 5 seconds
     setInterval(checkConnection, 5000);
+  }
+
+  /**
+   * Fetch and display the app version next to the "Kode" logo text.
+   * Sourced live from package.json (via Electron's app.getVersion()), so it
+   * always stays correct as the version bumps — never hardcode it here.
+   */
+  async function loadAppVersion() {
+    try {
+      const version = await window.kode.getAppVersion();
+      const el = document.getElementById('app-version');
+      if (el && version) el.textContent = `v${version}`;
+    } catch {
+      // Non-critical — just leave the badge empty if this fails.
+    }
   }
 
   /* ==========================================================
@@ -144,7 +160,7 @@
     const label = statusLabel();
     if (!dot || !label) return;
 
-    const PROVIDER_LABELS = { ollama: 'Ollama', deepseek: 'DeepSeek', openai: 'OpenAI', anthropic: 'Claude', custom: 'Custom API' };
+    const PROVIDER_LABELS = { ollama: 'Ollama', deepseek: 'DeepSeek', openai: 'OpenAI', anthropic: 'Claude', openrouter: 'OpenRouter', custom: 'Custom API' };
     const providerLabel = PROVIDER_LABELS[provider] || 'Ollama';
 
     if (connected) {
@@ -1475,12 +1491,14 @@
     const tabDeepseek = document.getElementById('tab-deepseek');
     const tabOpenai = document.getElementById('tab-openai');
     const tabAnthropic = document.getElementById('tab-anthropic');
+    const tabOpenrouter = document.getElementById('tab-openrouter');
     const tabCustom = document.getElementById('tab-custom');
 
     if (tabOllama) tabOllama.addEventListener('click', () => switchProviderTab('ollama'));
     if (tabDeepseek) tabDeepseek.addEventListener('click', () => switchProviderTab('deepseek'));
     if (tabOpenai) tabOpenai.addEventListener('click', () => switchProviderTab('openai'));
     if (tabAnthropic) tabAnthropic.addEventListener('click', () => switchProviderTab('anthropic'));
+    if (tabOpenrouter) tabOpenrouter.addEventListener('click', () => switchProviderTab('openrouter'));
     if (tabCustom) tabCustom.addEventListener('click', () => switchProviderTab('custom'));
 
     // Test buttons
@@ -1488,18 +1506,21 @@
     const testDeepseek = document.getElementById('test-deepseek-btn');
     const testOpenai = document.getElementById('test-openai-btn');
     const testAnthropic = document.getElementById('test-anthropic-btn');
+    const testOpenrouter = document.getElementById('test-openrouter-btn');
     const testCustom = document.getElementById('test-custom-btn');
 
     if (testOllama) testOllama.addEventListener('click', testOllamaConnection);
     if (testDeepseek) testDeepseek.addEventListener('click', testDeepseekConnection);
     if (testOpenai) testOpenai.addEventListener('click', testOpenaiConnection);
     if (testAnthropic) testAnthropic.addEventListener('click', testAnthropicConnection);
+    if (testOpenrouter) testOpenrouter.addEventListener('click', testOpenrouterConnection);
     if (testCustom) testCustom.addEventListener('click', testCustomConnection);
 
-    // API key visibility toggles — same pattern for all four cloud/custom providers
+    // API key visibility toggles — same pattern for all cloud/custom providers
     setupKeyVisibilityToggle('toggle-key-vis', 'deepseek-key');
     setupKeyVisibilityToggle('toggle-openai-key-vis', 'openai-key');
     setupKeyVisibilityToggle('toggle-anthropic-key-vis', 'anthropic-key');
+    setupKeyVisibilityToggle('toggle-openrouter-key-vis', 'openrouter-key');
     setupKeyVisibilityToggle('toggle-custom-key-vis', 'custom-key');
   }
 
@@ -1531,6 +1552,7 @@
       const keyInput = document.getElementById('deepseek-key');
       const openaiKeyInput = document.getElementById('openai-key');
       const anthropicKeyInput = document.getElementById('anthropic-key');
+      const openrouterKeyInput = document.getElementById('openrouter-key');
       const customBaseUrlInput = document.getElementById('custom-base-url');
       const customKeyInput = document.getElementById('custom-key');
       const customContextInput = document.getElementById('custom-context-size');
@@ -1542,6 +1564,7 @@
       if (keyInput) keyInput.value = settings.deepseekApiKey || '';
       if (openaiKeyInput) openaiKeyInput.value = settings.openaiApiKey || '';
       if (anthropicKeyInput) anthropicKeyInput.value = settings.anthropicApiKey || '';
+      if (openrouterKeyInput) openrouterKeyInput.value = settings.openrouterApiKey || '';
       if (customBaseUrlInput) customBaseUrlInput.value = settings.customBaseUrl || '';
       if (customKeyInput) customKeyInput.value = settings.customApiKey || '';
       if (customContextInput) customContextInput.value = String(settings.customContextSize || 32768);
@@ -1575,6 +1598,7 @@
     document.getElementById('config-deepseek')?.classList.toggle('active', provider === 'deepseek');
     document.getElementById('config-openai')?.classList.toggle('active', provider === 'openai');
     document.getElementById('config-anthropic')?.classList.toggle('active', provider === 'anthropic');
+    document.getElementById('config-openrouter')?.classList.toggle('active', provider === 'openrouter');
     document.getElementById('config-custom')?.classList.toggle('active', provider === 'custom');
   }
 
@@ -1668,6 +1692,9 @@
   const testDeepseekConnection = () => testApiKeyConnection({ provider: 'deepseek', btnId: 'test-deepseek-btn', resultId: 'deepseek-result', inputId: 'deepseek-key', label: 'DeepSeek' });
   const testOpenaiConnection = () => testApiKeyConnection({ provider: 'openai', btnId: 'test-openai-btn', resultId: 'openai-result', inputId: 'openai-key', label: 'OpenAI' });
   const testAnthropicConnection = () => testApiKeyConnection({ provider: 'anthropic', btnId: 'test-anthropic-btn', resultId: 'anthropic-result', inputId: 'anthropic-key', label: 'Claude' });
+  // OpenRouter's base URL is fixed (see main.js's OPENROUTER_BASE_URL) — only the key
+  // is user-supplied, so this fits the plain API-key flow just like the three above.
+  const testOpenrouterConnection = () => testApiKeyConnection({ provider: 'openrouter', btnId: 'test-openrouter-btn', resultId: 'openrouter-result', inputId: 'openrouter-key', label: 'OpenRouter' });
 
   /**
    * "Other (Custom)" needs its own flow rather than testApiKeyConnection() — it
@@ -1718,7 +1745,7 @@
   }
 
   function clearTestResults() {
-    ['ollama-result', 'deepseek-result', 'openai-result', 'anthropic-result', 'custom-result'].forEach(id => {
+    ['ollama-result', 'deepseek-result', 'openai-result', 'anthropic-result', 'openrouter-result', 'custom-result'].forEach(id => {
       const el = document.getElementById(id);
       if (el) {
         el.className = 'connection-result';
@@ -1734,6 +1761,7 @@
     const apiKey = document.getElementById('deepseek-key')?.value?.trim() || '';
     const openaiApiKey = document.getElementById('openai-key')?.value?.trim() || '';
     const anthropicApiKey = document.getElementById('anthropic-key')?.value?.trim() || '';
+    const openrouterApiKey = document.getElementById('openrouter-key')?.value?.trim() || '';
     const customBaseUrl = document.getElementById('custom-base-url')?.value?.trim() || '';
     const customApiKey = document.getElementById('custom-key')?.value?.trim() || '';
     const customContextSize = parseInt(document.getElementById('custom-context-size')?.value, 10) || 32768;
@@ -1748,6 +1776,7 @@
         deepseekApiKey: apiKey,
         openaiApiKey,
         anthropicApiKey,
+        openrouterApiKey,
         customBaseUrl,
         customApiKey,
         customContextSize,
