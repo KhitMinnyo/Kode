@@ -10,6 +10,15 @@ const ANTHROPIC_VERSION = '2023-06-01'; // dated API version header; bump if Ant
 // build; the live endpoint is authoritative whenever it's reachable.
 const FALLBACK_MODELS = ['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5-20251001', 'claude-fable-5-1'];
 
+// Max context window differs across current Claude models: Haiku 4.5 is capped at
+// 200K, while every other current model (Opus 5, Sonnet 5, Fable 5.1) supports the
+// full 1M window. Previously this was hardcoded to a flat 200000 for every model,
+// which silently throttled _buildContextMessages's history budget (agent/core.js) to
+// 1/5th of what Opus 5/Sonnet 5/Fable 5.1 actually support — trimming/summarizing
+// conversation history far more aggressively than necessary on a multi-step task.
+const CONTEXT_SIZES = { 'claude-haiku-4-5-20251001': 200000 };
+const DEFAULT_CONTEXT_SIZE = 1000000; // Opus 5 / Sonnet 5 / Fable 5.1 and any newer model
+
 class AnthropicClient {
   constructor(apiKey = '') {
     this.apiKey = apiKey;
@@ -185,12 +194,12 @@ class AnthropicClient {
   }
 
   async getModelInfo(model) {
-    return { name: model, details: { context_length: 200000 } };
+    return { name: model, details: { context_length: CONTEXT_SIZES[model] || DEFAULT_CONTEXT_SIZE } };
   }
 
-  /** Claude models are consistently 200K context as of this build. */
-  async getContextSize() {
-    return 200000;
+  /** See the CONTEXT_SIZES comment above — Haiku 4.5 is 200K, everything else is 1M. */
+  async getContextSize(model) {
+    return CONTEXT_SIZES[model] || DEFAULT_CONTEXT_SIZE;
   }
 
   /**
@@ -244,7 +253,12 @@ class AnthropicClient {
       system,
       messages: conversation,
       stream: true,
-      max_tokens: opts.maxTokens || 4096,
+      // 4096 was needlessly small for an agent turn that writes real file content —
+      // current Claude models support up to 128K output (64K for Haiku 4.5), no beta
+      // header required. 32768 is safely under every current model's ceiling while
+      // giving real headroom; this is a cap, not a target, so there's no cost to
+      // setting it generously high — the model still stops on its own when done.
+      max_tokens: opts.maxTokens || 32768,
       temperature: opts.temperature !== undefined ? opts.temperature : 0.7,
     };
     if (Array.isArray(opts.tools) && opts.tools.length > 0) {

@@ -786,7 +786,7 @@ ${newlyDroppedText}`;
         const toolResultsMessage = toolResultParts.join('\n\n---\n\n');
         conversationHistory.push({
           role: 'user',
-          content: `Tool results:\n${toolResultsMessage}\n\nContinue to the next step. If all steps are done, summarize what was accomplished.`,
+          content: `Tool results:\n${toolResultsMessage}\n\nIn one short line, say what that step accomplished, then immediately continue to the next step — don't stop to ask if you should keep going. Only stop if you're genuinely blocked and need something from the user. If the entire task is now fully done, say so explicitly: start your final line with "✅ Done:" and summarize what changed.`,
         });
 
         // Continue the loop — the LLM will see the tool results and may generate more tool calls

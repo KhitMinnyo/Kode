@@ -365,7 +365,17 @@ class DeepSeekClient {
       messages,
       stream: true,
       temperature: opts.temperature !== undefined ? opts.temperature : 0.7,
-      max_tokens: 2048,
+      // DeepSeek's docs don't publish a numeric default, and v4 models support up to
+      // ~384K output tokens — the old hardcoded 2048 here was far too small for an
+      // agent turn that writes a real file (create_file/edit_file/apply_patch put the
+      // whole file's content inside the tool call's arguments, which count against
+      // this same budget). Hitting that ceiling silently truncated the response
+      // mid-tool-call, which looked exactly like "the agent did a little and stopped."
+      // 32768 gives generous headroom (well clear of the real ~384K ceiling) while
+      // staying configurable via opts.maxTokens. This is a cap, not a target — the
+      // model still stops on its own once it's actually done, so there's no cost to
+      // setting it generously high.
+      max_tokens: opts.maxTokens || 32768,
     };
     if (Array.isArray(opts.tools) && opts.tools.length > 0) {
       requestBody.tools = opts.tools;

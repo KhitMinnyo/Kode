@@ -192,12 +192,17 @@ class OpenAIClient {
   }
 
   async getModelInfo(model) {
-    return { name: model, details: { context_length: 128000 } };
+    return { name: model, details: { context_length: 1050000 } };
   }
 
-  /** OpenAI doesn't expose per-model context length via API; 128K is a safe modern default. */
+  /**
+   * OpenAI doesn't expose per-model context length via API. Current flagship models
+   * (GPT-6 Astra, GPT-5.6 Sol/Terra/Luna) all share a ~1.05M-token context window
+   * with 128K max output — the previous flat 128000 here undersold the real context
+   * by ~8x, needlessly throttling _buildContextMessages's history budget (agent/core.js).
+   */
   async getContextSize() {
-    return 128000;
+    return 1050000;
   }
 
   /**
