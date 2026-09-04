@@ -4,7 +4,7 @@
   <img src="icon.png" width="128" height="128" alt="Kode Logo">
 </p>
 
-**Kode** is a native macOS desktop AI agent built primarily around local [Ollama](https://ollama.ai) models, with optional cloud providers (OpenAI, Anthropic Claude, DeepSeek) available in Settings. Unlike cloud-only coding agents (Claude Code, OpenCode, etc.), everything Kode does with local models — reading your code, running commands, scanning targets — happens entirely on your machine: nothing is sent anywhere unless you explicitly enable web research or switch to a cloud provider. That makes it the natural choice for security research, work on private/regulated codebases, or simply not wanting your code and terminal output leaving your laptop. It combines a full-featured coding assistant — with a git-backed safety net, patch-based editing, and local semantic code search — with professional-grade penetration testing capabilities, plus persistent per-project memory and web research tools.
+**Kode** is a native macOS desktop AI agent built primarily around local [Ollama](https://ollama.ai) models, with optional cloud providers (OpenAI, Anthropic Claude, DeepSeek) — or any other OpenAI-compatible API (Groq, OpenRouter, Together AI, a local LM Studio/vLLM server, etc.) via a custom endpoint — available in Settings. Unlike cloud-only coding agents (Claude Code, OpenCode, etc.), everything Kode does with local models — reading your code, running commands, scanning targets — happens entirely on your machine: nothing is sent anywhere unless you explicitly enable web research or switch to a cloud provider. That makes it the natural choice for security research, work on private/regulated codebases, or simply not wanting your code and terminal output leaving your laptop. It combines a full-featured coding assistant — with a git-backed safety net, patch-based editing, and local semantic code search — with professional-grade penetration testing capabilities, plus persistent per-project memory and web research tools.
 
 ## ✨ Features
 
@@ -12,7 +12,7 @@
 - **Autonomous coding** — Create files, edit code, run commands, debug errors
 - **Project awareness** — Understands your project structure and context
 - **Step-by-step execution** — Plans before acting, chains tool results; `write_plan` gives long/vague tasks an explicit, visible checklist instead of losing the thread
-- **Multi-model support** — Switch between any Ollama model, or OpenAI/Anthropic/DeepSeek in Settings
+- **Multi-model support** — Switch between any Ollama model, OpenAI/Anthropic/DeepSeek, or any other OpenAI-compatible API (Groq, OpenRouter, Together AI, local servers, etc.) in Settings
 
 ### 🛟 Safety Net & Verification
 - **Git checkpoints** — `git_checkpoint` stages and commits a labeled snapshot (auto-initializes a repo the first time), so any edit can be undone

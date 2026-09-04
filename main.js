@@ -8,6 +8,7 @@ const OllamaClient = require('./src/ollama/client');
 const DeepSeekClient = require('./src/deepseek/client');
 const OpenAIClient = require('./src/openai/client');
 const AnthropicClient = require('./src/anthropic/client');
+const CustomClient = require('./src/custom/client');
 const AgentCore = require('./src/agent/core');
 const memoryStore = require('./src/agent/memory');
 const processManager = require('./src/agent/processManager');
@@ -31,7 +32,7 @@ const SETTINGS_FILE = path.join(app.getPath('userData'), 'kode-settings.json');
 // These hold API keys, so they're encrypted at rest via Electron's safeStorage
 // (OS keychain on macOS, libsecret/kwallet on Linux, DPAPI on Windows) rather than
 // written to disk as plaintext JSON.
-const SECRET_FIELDS = ['deepseekApiKey', 'openaiApiKey', 'anthropicApiKey'];
+const SECRET_FIELDS = ['deepseekApiKey', 'openaiApiKey', 'anthropicApiKey', 'customApiKey'];
 
 /**
  * Encrypts a secret for on-disk storage. Falls back to storing it in plaintext
@@ -86,12 +87,15 @@ function loadSettings() {
 
 function getDefaultSettings() {
   return {
-    provider: 'ollama',          // 'ollama' | 'deepseek' | 'openai' | 'anthropic'
+    provider: 'ollama',          // 'ollama' | 'deepseek' | 'openai' | 'anthropic' | 'custom'
     ollamaHost: 'localhost',     // Ollama server hostname/IP
     ollamaPort: 11434,           // Ollama server port
     deepseekApiKey: '',          // DeepSeek API key
     openaiApiKey: '',            // OpenAI (ChatGPT) API key
     anthropicApiKey: '',         // Anthropic (Claude) API key
+    customApiKey: '',            // API key for the custom OpenAI-compatible provider (optional — many self-hosted servers don't need one)
+    customBaseUrl: '',           // Base URL for the custom provider, e.g. https://api.groq.com/openai/v1
+    customContextSize: 32768,    // Assumed context window for the custom provider — not auto-detectable, see src/custom/client.js
     maxContextTokens: 16384,     // Context-size ceiling; raise for large-context models (e.g. Qwen3.6)
     confirmRiskyCommands: true,  // Pause run_command's "risky but allowed" tier (curl|sh, base64->sh, etc.) for user approval — see src/agent/tools.js
   };
@@ -124,6 +128,7 @@ let ollamaClient = new OllamaClient(buildOllamaUrl(appSettings.ollamaHost, appSe
 let deepseekClient = new DeepSeekClient(appSettings.deepseekApiKey || '');
 let openaiClient = new OpenAIClient(appSettings.openaiApiKey || '');
 let anthropicClient = new AnthropicClient(appSettings.anthropicApiKey || '');
+let customClient = new CustomClient(appSettings.customApiKey || '', appSettings.customBaseUrl || '', appSettings.customContextSize || 32768);
 
 // Active client depends on provider setting
 function getActiveClient() {
@@ -131,11 +136,16 @@ function getActiveClient() {
     case 'deepseek': return deepseekClient;
     case 'openai': return openaiClient;
     case 'anthropic': return anthropicClient;
+    case 'custom': return customClient;
     default: return ollamaClient;
   }
 }
 
-const agentCore = new AgentCore(ollamaClient, appSettings.maxContextTokens, appSettings.provider);
+// Bind to whichever provider was actually selected at startup (getActiveClient()),
+// not always the local Ollama client — otherwise, on relaunch with a cloud provider
+// already selected in settings, the agent would keep talking to Ollama (mismatched
+// against its own this.provider tag) until the user re-opened and re-saved Settings.
+const agentCore = new AgentCore(getActiveClient(), appSettings.maxContextTokens, appSettings.provider);
 
 // ─── Chat Storage ────────────────────────────────────────────────────────────
 const CHATS_FILE = path.join(app.getPath('userData'), 'kode-chats.json');
@@ -780,6 +790,9 @@ function registerIPCHandlers() {
       deepseekClient.updateApiKey(appSettings.deepseekApiKey || '');
       openaiClient.updateApiKey(appSettings.openaiApiKey || '');
       anthropicClient.updateApiKey(appSettings.anthropicApiKey || '');
+      customClient.updateApiKey(appSettings.customApiKey || '');
+      customClient.updateBaseUrl(appSettings.customBaseUrl || '');
+      customClient.updateContextSize(appSettings.customContextSize || 32768);
 
       // Update AgentCore's client reference + provider tag based on the selected provider
       agentCore.ollamaClient = getActiveClient();
@@ -798,13 +811,14 @@ function registerIPCHandlers() {
   /**
    * Test connection to a specific host (without saving)
    */
-  ipcMain.handle('test-connection', async (event, { provider, ollamaHost, ollamaPort, deepseekApiKey, openaiApiKey, anthropicApiKey }) => {
+  ipcMain.handle('test-connection', async (event, { provider, ollamaHost, ollamaPort, deepseekApiKey, openaiApiKey, anthropicApiKey, customApiKey, customBaseUrl }) => {
     try {
       let testClient;
       switch (provider) {
         case 'deepseek': testClient = new DeepSeekClient(deepseekApiKey || ''); break;
         case 'openai': testClient = new OpenAIClient(openaiApiKey || ''); break;
         case 'anthropic': testClient = new AnthropicClient(anthropicApiKey || ''); break;
+        case 'custom': testClient = new CustomClient(customApiKey || '', customBaseUrl || ''); break;
         default: testClient = new OllamaClient(buildOllamaUrl(ollamaHost, ollamaPort));
       }
       return await testClient.checkConnection();

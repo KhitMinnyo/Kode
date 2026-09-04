@@ -198,6 +198,10 @@
               <span class="tab-icon">🔮</span>
               Claude API
             </button>
+            <button class="provider-tab" data-provider="custom" id="tab-custom">
+              <span class="tab-icon">🧩</span>
+              Other (Custom)
+            </button>
           </div>
         </div>
 
@@ -328,6 +332,37 @@
             <span>🔍</span> Test API Key
           </button>
           <div class="connection-result" id="anthropic-result"></div>
+        </div>
+
+        <!-- Custom (Other OpenAI-compatible API) Config -->
+        <div class="provider-config" id="config-custom">
+          <div class="settings-group">
+            <div class="settings-group-title">
+              <span class="group-icon">🧩</span>
+              Custom / Other API
+            </div>
+            <div class="settings-field">
+              <label for="custom-base-url">Base URL</label>
+              <input type="text" id="custom-base-url" placeholder="https://api.groq.com/openai/v1" />
+              <span class="field-hint">🔗 Works with any OpenAI-compatible API — Groq, OpenRouter, Together AI, Mistral, Fireworks, xAI, Perplexity, or a local server (LM Studio, vLLM, llama.cpp server). Enter its base URL including the version path (usually ending in <strong>/v1</strong>).</span>
+            </div>
+            <div class="settings-field">
+              <label for="custom-key">API Key (optional — leave blank for local servers with no auth)</label>
+              <div class="api-key-wrapper">
+                <input type="password" id="custom-key" placeholder="sk-..." />
+                <button class="api-key-toggle" id="toggle-custom-key-vis" title="Toggle visibility">👁</button>
+              </div>
+            </div>
+            <div class="settings-field">
+              <label for="custom-context-size">Context Window (tokens)</label>
+              <input type="number" id="custom-context-size" placeholder="32768" value="32768" min="512" step="512" />
+              <span class="field-hint">💡 Kode can't auto-detect this provider's context limit — set it to match the model you'll use so conversations get trimmed correctly.</span>
+            </div>
+          </div>
+          <button class="test-connection-btn" id="test-custom-btn">
+            <span>🔍</span> Test Connection
+          </button>
+          <div class="connection-result" id="custom-result"></div>
         </div>
 
       </div>

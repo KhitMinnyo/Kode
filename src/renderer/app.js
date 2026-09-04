@@ -144,7 +144,8 @@
     const label = statusLabel();
     if (!dot || !label) return;
 
-    const providerLabel = provider === 'deepseek' ? 'DeepSeek' : 'Ollama';
+    const PROVIDER_LABELS = { ollama: 'Ollama', deepseek: 'DeepSeek', openai: 'OpenAI', anthropic: 'Claude', custom: 'Custom API' };
+    const providerLabel = PROVIDER_LABELS[provider] || 'Ollama';
 
     if (connected) {
       dot.classList.add('connected');
@@ -1474,27 +1475,32 @@
     const tabDeepseek = document.getElementById('tab-deepseek');
     const tabOpenai = document.getElementById('tab-openai');
     const tabAnthropic = document.getElementById('tab-anthropic');
+    const tabCustom = document.getElementById('tab-custom');
 
     if (tabOllama) tabOllama.addEventListener('click', () => switchProviderTab('ollama'));
     if (tabDeepseek) tabDeepseek.addEventListener('click', () => switchProviderTab('deepseek'));
     if (tabOpenai) tabOpenai.addEventListener('click', () => switchProviderTab('openai'));
     if (tabAnthropic) tabAnthropic.addEventListener('click', () => switchProviderTab('anthropic'));
+    if (tabCustom) tabCustom.addEventListener('click', () => switchProviderTab('custom'));
 
     // Test buttons
     const testOllama = document.getElementById('test-ollama-btn');
     const testDeepseek = document.getElementById('test-deepseek-btn');
     const testOpenai = document.getElementById('test-openai-btn');
     const testAnthropic = document.getElementById('test-anthropic-btn');
+    const testCustom = document.getElementById('test-custom-btn');
 
     if (testOllama) testOllama.addEventListener('click', testOllamaConnection);
     if (testDeepseek) testDeepseek.addEventListener('click', testDeepseekConnection);
     if (testOpenai) testOpenai.addEventListener('click', testOpenaiConnection);
     if (testAnthropic) testAnthropic.addEventListener('click', testAnthropicConnection);
+    if (testCustom) testCustom.addEventListener('click', testCustomConnection);
 
-    // API key visibility toggles — same pattern for all three cloud providers
+    // API key visibility toggles — same pattern for all four cloud/custom providers
     setupKeyVisibilityToggle('toggle-key-vis', 'deepseek-key');
     setupKeyVisibilityToggle('toggle-openai-key-vis', 'openai-key');
     setupKeyVisibilityToggle('toggle-anthropic-key-vis', 'anthropic-key');
+    setupKeyVisibilityToggle('toggle-custom-key-vis', 'custom-key');
   }
 
   function setupKeyVisibilityToggle(toggleId, inputId) {
@@ -1525,6 +1531,9 @@
       const keyInput = document.getElementById('deepseek-key');
       const openaiKeyInput = document.getElementById('openai-key');
       const anthropicKeyInput = document.getElementById('anthropic-key');
+      const customBaseUrlInput = document.getElementById('custom-base-url');
+      const customKeyInput = document.getElementById('custom-key');
+      const customContextInput = document.getElementById('custom-context-size');
       const contextInput = document.getElementById('max-context-tokens');
       const confirmRiskyInput = document.getElementById('confirm-risky-commands');
 
@@ -1533,6 +1542,9 @@
       if (keyInput) keyInput.value = settings.deepseekApiKey || '';
       if (openaiKeyInput) openaiKeyInput.value = settings.openaiApiKey || '';
       if (anthropicKeyInput) anthropicKeyInput.value = settings.anthropicApiKey || '';
+      if (customBaseUrlInput) customBaseUrlInput.value = settings.customBaseUrl || '';
+      if (customKeyInput) customKeyInput.value = settings.customApiKey || '';
+      if (customContextInput) customContextInput.value = String(settings.customContextSize || 32768);
       if (contextInput) contextInput.value = String(settings.maxContextTokens || 16384);
       if (confirmRiskyInput) confirmRiskyInput.checked = settings.confirmRiskyCommands !== false;
 
@@ -1563,6 +1575,7 @@
     document.getElementById('config-deepseek')?.classList.toggle('active', provider === 'deepseek');
     document.getElementById('config-openai')?.classList.toggle('active', provider === 'openai');
     document.getElementById('config-anthropic')?.classList.toggle('active', provider === 'anthropic');
+    document.getElementById('config-custom')?.classList.toggle('active', provider === 'custom');
   }
 
   function getSelectedProvider() {
@@ -1656,8 +1669,56 @@
   const testOpenaiConnection = () => testApiKeyConnection({ provider: 'openai', btnId: 'test-openai-btn', resultId: 'openai-result', inputId: 'openai-key', label: 'OpenAI' });
   const testAnthropicConnection = () => testApiKeyConnection({ provider: 'anthropic', btnId: 'test-anthropic-btn', resultId: 'anthropic-result', inputId: 'anthropic-key', label: 'Claude' });
 
+  /**
+   * "Other (Custom)" needs its own flow rather than testApiKeyConnection() — it
+   * requires a base URL (not just an API key, which is itself optional here for
+   * no-auth local servers).
+   */
+  async function testCustomConnection() {
+    const btn = document.getElementById('test-custom-btn');
+    const resultEl = document.getElementById('custom-result');
+    const baseUrl = document.getElementById('custom-base-url')?.value?.trim() || '';
+    const apiKey = document.getElementById('custom-key')?.value?.trim() || '';
+
+    if (!btn || !resultEl) return;
+
+    if (!baseUrl) {
+      resultEl.className = 'connection-result visible error';
+      resultEl.textContent = '❌ Please enter a base URL';
+      return;
+    }
+
+    btn.classList.add('testing');
+    btn.innerHTML = '<span>⏳</span> Testing...';
+    resultEl.className = 'connection-result';
+    resultEl.classList.remove('visible');
+
+    try {
+      const result = await window.kode.testConnection({
+        provider: 'custom',
+        customBaseUrl: baseUrl,
+        customApiKey: apiKey,
+      });
+
+      resultEl.classList.add('visible');
+      if (result.connected) {
+        resultEl.className = 'connection-result visible success';
+        resultEl.textContent = '✅ Connected successfully';
+      } else {
+        resultEl.className = 'connection-result visible error';
+        resultEl.textContent = `❌ ${result.error || 'Connection failed'}`;
+      }
+    } catch (err) {
+      resultEl.className = 'connection-result visible error';
+      resultEl.textContent = `❌ Error: ${err.message}`;
+    } finally {
+      btn.classList.remove('testing');
+      btn.innerHTML = '<span>🔍</span> Test Connection';
+    }
+  }
+
   function clearTestResults() {
-    ['ollama-result', 'deepseek-result', 'openai-result', 'anthropic-result'].forEach(id => {
+    ['ollama-result', 'deepseek-result', 'openai-result', 'anthropic-result', 'custom-result'].forEach(id => {
       const el = document.getElementById(id);
       if (el) {
         el.className = 'connection-result';
@@ -1673,6 +1734,9 @@
     const apiKey = document.getElementById('deepseek-key')?.value?.trim() || '';
     const openaiApiKey = document.getElementById('openai-key')?.value?.trim() || '';
     const anthropicApiKey = document.getElementById('anthropic-key')?.value?.trim() || '';
+    const customBaseUrl = document.getElementById('custom-base-url')?.value?.trim() || '';
+    const customApiKey = document.getElementById('custom-key')?.value?.trim() || '';
+    const customContextSize = parseInt(document.getElementById('custom-context-size')?.value, 10) || 32768;
     const maxContextTokens = parseInt(document.getElementById('max-context-tokens')?.value, 10) || 16384;
     const confirmRiskyCommands = document.getElementById('confirm-risky-commands')?.checked !== false;
 
@@ -1684,6 +1748,9 @@
         deepseekApiKey: apiKey,
         openaiApiKey,
         anthropicApiKey,
+        customBaseUrl,
+        customApiKey,
+        customContextSize,
         maxContextTokens,
         confirmRiskyCommands,
       });

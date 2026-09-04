@@ -6,6 +6,7 @@ const assert = require('node:assert/strict');
 const OpenAIClient = require('../src/openai/client');
 const AnthropicClient = require('../src/anthropic/client');
 const DeepSeekClient = require('../src/deepseek/client');
+const CustomClient = require('../src/custom/client');
 
 /**
  * All three clients take `_streamRequest(method, path, body, onData, opts)` as their
@@ -172,4 +173,72 @@ test('DeepSeekClient.chat reassembles fragmented tool_calls the same way as Open
   assert.equal(result.toolCalls.length, 1);
   assert.equal(result.toolCalls[0].function.name, 'run_command');
   assert.deepEqual(JSON.parse(result.toolCalls[0].function.arguments), { command: 'ls' });
+});
+
+// ───────────────────────── Custom (Other OpenAI-compatible) ─────────────────────────
+
+test('CustomClient.chat accumulates streamed text content (OpenAI-compatible format)', async () => {
+  const client = new CustomClient('fake-key', 'https://example.com/v1');
+  mockStream(client, [
+    { choices: [{ delta: { content: 'Hello' } }] },
+    { choices: [{ delta: { content: ' there' } }] },
+    { choices: [{ delta: {}, finish_reason: 'stop' }] },
+  ]);
+
+  const result = await client.chat('some-model', [{ role: 'user', content: 'hi' }]);
+  assert.equal(result.text, 'Hello there');
+  assert.deepEqual(result.toolCalls, []);
+});
+
+test('CustomClient.chat reassembles fragmented tool_calls the same way as OpenAIClient', async () => {
+  const client = new CustomClient('fake-key', 'https://example.com/v1');
+  mockStream(client, [
+    { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_1', function: { name: 'read', arguments: '' } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 0, function: { name: '_file', arguments: '{"path":"a.py"}' } }] } }] },
+  ]);
+
+  const result = await client.chat('some-model', [{ role: 'user', content: 'hi' }]);
+  assert.equal(result.toolCalls.length, 1);
+  assert.equal(result.toolCalls[0].function.name, 'read_file');
+  assert.deepEqual(JSON.parse(result.toolCalls[0].function.arguments), { path: 'a.py' });
+});
+
+test('CustomClient.chat rejects with a clear message when no base URL is configured', async () => {
+  const client = new CustomClient('fake-key', '');
+  await assert.rejects(
+    client.chat('some-model', [{ role: 'user', content: 'hi' }]),
+    /base URL is not configured/,
+  );
+});
+
+test('CustomClient parses an https base URL into hostname/port/pathPrefix', () => {
+  const client = new CustomClient('', 'https://api.groq.com/openai/v1/');
+  assert.equal(client._parsedBase.hostname, 'api.groq.com');
+  // Node's URL puts an explicit port in the URL as a string, but a defaulted port
+  // (nothing in the URL, as here) falls back to the numeric literal below — both are
+  // valid for Node's http/https `options.port`.
+  assert.equal(client._parsedBase.port, 443);
+  assert.equal(client._parsedBase.pathPrefix, '/openai/v1');
+});
+
+test('CustomClient parses an http (local server) base URL and defaults its port to 80', () => {
+  const client = new CustomClient('', 'http://localhost:1234/v1');
+  assert.equal(client._parsedBase.hostname, 'localhost');
+  assert.equal(client._parsedBase.port, '1234');
+  assert.equal(client._parsedBase.pathPrefix, '/v1');
+});
+
+test('CustomClient falls back to a safe default context size on invalid input', () => {
+  const client = new CustomClient('', 'https://example.com/v1', 'not-a-number');
+  assert.equal(client.contextSize, 32768);
+  client.updateContextSize(8192);
+  assert.equal(client.contextSize, 8192);
+});
+
+test('CustomClient omits the Authorization header entirely when no API key is set', () => {
+  const client = new CustomClient('', 'https://example.com/v1');
+  assert.equal(client._headers()['Authorization'], undefined);
+
+  const withKey = new CustomClient('abc123', 'https://example.com/v1');
+  assert.equal(withKey._headers()['Authorization'], 'Bearer abc123');
 });
