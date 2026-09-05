@@ -61,6 +61,7 @@
       planProgressResult: null, // raw write_plan result text, re-applied to the right panel on focus
       lastError: null,          // set when a background tab's generation fails; surfaced once the user focuses it
       _statusStartTime: null,
+      _lastStatusKind: null,     // 'thinking' | 'tool' | 'generating' — lets updateAgentStatus() detect a new step
       _tokenCount: 0,
     };
   }
@@ -1626,15 +1627,27 @@
   function updateAgentStatus(tab, status, message) {
     if (status === 'idle') {
       tab._statusStartTime = null;
+      tab._lastStatusKind = null;
       tab._tokenCount = 0;
       if (tab === activeTab()) clearAgentStatus();
       return;
     }
 
-    if (!tab._statusStartTime) {
+    const isNewTurn = !tab._statusStartTime;
+    // Give each step its own clock: a new phase (thinking -> tool -> generating, ...)
+    // or a fresh tool call (even a same-tool retry right after the last one) resets
+    // the timer, so the number next to "Running X..." reflects how long THIS step
+    // has taken. Without this, a turn that chains several quick, already-finished
+    // steps (check git status, a failed test run, a retry) keeps one running clock
+    // the whole time, so a step that's actually taken 10 seconds can display several
+    // minutes just because earlier steps in the same turn used up that time — reading
+    // as "stuck" when nothing is wrong. _tokenCount stays a whole-turn total, so it's
+    // only reset at the true start of the turn.
+    if (isNewTurn || status === 'tool' || status !== tab._lastStatusKind) {
       tab._statusStartTime = Date.now();
-      tab._tokenCount = 0;
     }
+    if (isNewTurn) tab._tokenCount = 0;
+    tab._lastStatusKind = status;
 
     if (tab !== activeTab()) return;
 
