@@ -100,7 +100,7 @@ npm start
 ### Build macOS App
 ```bash
 npm run build
-# → dist/Kode-1.1.0-arm64.dmg (Apple Silicon), dist/Kode-1.1.0-x64.dmg (Intel)
+# → dist/Kode-1.1.1-arm64.dmg (Apple Silicon), dist/Kode-1.1.1-x64.dmg (Intel)
 ```
 
 ### Tests & Linting

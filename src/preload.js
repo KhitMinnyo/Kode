@@ -163,7 +163,7 @@ contextBridge.exposeInMainWorld('kode', {
   testConnection: (params) => ipcRenderer.invoke('test-connection', params),
 
   /**
-   * Get the app's version string (e.g. "1.1.0"), read from package.json.
+   * Get the app's version string (e.g. "1.1.1"), read from package.json.
    * @returns {Promise<string>}
    */
   getAppVersion: () => ipcRenderer.invoke('get-app-version'),
