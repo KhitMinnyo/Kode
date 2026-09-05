@@ -27,6 +27,8 @@
     _statusTimer: null,
     _statusStartTime: null,
     _tokenCount: 0,
+    attachments: [],           // Staged files/folders for the next message: { id, path, name, type, content, status, error }
+    _attachmentIdCounter: 0,
   };
 
   /** Human-readable label per provider — shared by the connection status pill and Settings. */
@@ -105,6 +107,9 @@
   const newChatBtn        = () => $('#new-chat-btn');
   const openFolderBtn     = () => $('#open-folder-btn');
   const rightPanelFiles   = () => $('#right-panel-files');
+  const attachmentsRow    = () => $('#attachments-row');
+  const attachFileBtn     = () => $('#attach-file-btn');
+  const attachFolderBtn   = () => $('#attach-folder-btn');
 
   /* ==========================================================
      Initialisation
@@ -119,6 +124,7 @@
     setupMemoryListeners();
     setupProcessesListeners();
     setupCommandConfirmListener();
+    setupAttachmentListeners();
     loadAppVersion();
     setupUpdateBanner();
     checkForUpdates();
@@ -385,6 +391,132 @@
   }
 
   /* ==========================================================
+     Attachments — "attach file(s)" / "attach folder", like Claude's own file
+     attachment UI. Staged items show as removable chips above the input; on send,
+     their content (read via main.js's get-attachment-content, which reuses
+     agent/tools.js's own read_file/folder-tree logic) is appended to what the
+     MODEL receives, while the chat itself keeps showing just the user's typed text
+     plus small static chips — never the raw file content — so attaching a big file
+     doesn't balloon the conversation the way un-collapsed tool cards used to.
+     ========================================================== */
+  function setupAttachmentListeners() {
+    const fileBtn = attachFileBtn();
+    if (fileBtn) fileBtn.addEventListener('click', async () => {
+      try {
+        const result = await window.kode.pickAttachmentFiles();
+        if (result.success && result.paths) {
+          result.paths.forEach((p) => addAttachment(p));
+        }
+      } catch (err) {
+        console.error('Attach file(s) failed:', err);
+      }
+    });
+
+    const folderBtn = attachFolderBtn();
+    if (folderBtn) folderBtn.addEventListener('click', async () => {
+      try {
+        const result = await window.kode.pickAttachmentFolder();
+        if (result.success && result.path) {
+          addAttachment(result.path);
+        }
+      } catch (err) {
+        console.error('Attach folder failed:', err);
+      }
+    });
+
+    // Event delegation for each chip's remove (✕) button
+    const row = attachmentsRow();
+    if (row) row.addEventListener('click', (e) => {
+      const removeBtn = e.target.closest('.attachment-chip-remove');
+      if (removeBtn) removeAttachment(removeBtn.dataset.id);
+    });
+  }
+
+  async function addAttachment(attachedPath) {
+    // Skip if this exact path is already staged
+    if (state.attachments.some(a => a.path === attachedPath)) return;
+
+    const id = String(++state._attachmentIdCounter);
+    const name = attachedPath.split(/[\\/]/).pop() || attachedPath;
+    state.attachments.push({ id, path: attachedPath, name, type: null, content: null, status: 'loading', error: null });
+    renderAttachments();
+
+    try {
+      const result = await window.kode.getAttachmentContent(attachedPath);
+      const entry = state.attachments.find(a => a.id === id);
+      if (!entry) return; // removed while loading
+      if (result.success) {
+        entry.type = result.type;
+        entry.content = result.content;
+        entry.status = 'ready';
+      } else {
+        entry.status = 'error';
+        entry.error = result.error || 'Failed to read';
+      }
+    } catch (err) {
+      const entry = state.attachments.find(a => a.id === id);
+      if (entry) {
+        entry.status = 'error';
+        entry.error = err.message || String(err);
+      }
+    }
+    renderAttachments();
+  }
+
+  function removeAttachment(id) {
+    state.attachments = state.attachments.filter(a => a.id !== id);
+    renderAttachments();
+  }
+
+  function renderAttachments() {
+    const row = attachmentsRow();
+    if (!row) return;
+    row.innerHTML = '';
+    if (state.attachments.length === 0) {
+      row.hidden = true;
+      return;
+    }
+    row.hidden = false;
+    state.attachments.forEach((a) => row.appendChild(createAttachmentChip(a, true)));
+  }
+
+  /** Builds one chip. `removable` controls whether a ✕ button is included (staged tray) or not (static, in a sent message). */
+  function createAttachmentChip(attachment, removable) {
+    const chip = document.createElement('div');
+    chip.className = 'attachment-chip' + (attachment.status === 'loading' ? ' loading' : '') + (attachment.status === 'error' ? ' error' : '');
+
+    const icon = document.createElement('span');
+    icon.className = 'attachment-chip-icon';
+    icon.textContent = attachment.status === 'loading' ? '⏳' : attachment.status === 'error' ? '⚠️' : (attachment.type === 'folder' ? '📁' : '📄');
+
+    const name = document.createElement('span');
+    name.className = 'attachment-chip-name';
+    name.textContent = attachment.name;
+    name.title = attachment.status === 'error' ? `${attachment.path} — ${attachment.error}` : attachment.path;
+
+    chip.append(icon, name);
+
+    if (removable) {
+      const removeBtn = document.createElement('button');
+      removeBtn.className = 'attachment-chip-remove';
+      removeBtn.dataset.id = attachment.id;
+      removeBtn.title = 'Remove';
+      removeBtn.textContent = '✕';
+      chip.appendChild(removeBtn);
+    }
+
+    return chip;
+  }
+
+  /** Static, non-removable chip row appended to an already-sent user message. */
+  function createAttachmentChipsDisplay(attachments) {
+    const wrap = document.createElement('div');
+    wrap.className = 'message-attachments';
+    attachments.forEach((a) => wrap.appendChild(createAttachmentChip(a, false)));
+    return wrap;
+  }
+
+  /* ==========================================================
      Send Message
      ========================================================== */
   async function sendMessage() {
@@ -392,35 +524,50 @@
     if (!input) return;
 
     const text = input.value.trim();
-    if (!text || state.isGenerating) return;
+    const readyAttachments = state.attachments.filter(a => a.status === 'ready');
+    if ((!text && readyAttachments.length === 0) || state.isGenerating) return;
     if (!state.currentModel) {
       appendError('Please select a model first.');
       return;
     }
 
-    // Clear input & reset height
+    // Clear input, reset height, and empty the attachment tray immediately (like
+    // Claude's own attach UI) — this turn's attachments are captured in
+    // readyAttachments above before the tray is cleared.
     input.value = '';
     input.style.height = 'auto';
+    state.attachments = [];
+    renderAttachments();
 
     // Remove welcome if present
     removeWelcome();
 
-    // Append user message
+    const displayText = text || (readyAttachments.length === 1 ? `Check ${readyAttachments[0].name}` : 'Check these attachments');
+
+    // Append user message — clean text only; attachment content is injected into
+    // messageToSend below, never shown raw here, so a big attached file doesn't
+    // balloon the chat itself. Small static chips show what was attached.
     const container = messagesContainer();
-    const userMsg = createMessageElement('user', text);
+    const userMsg = createMessageElement('user', displayText);
+    if (readyAttachments.length > 0) {
+      const bubble = userMsg.querySelector('.message-bubble');
+      if (bubble) bubble.appendChild(createAttachmentChipsDisplay(readyAttachments));
+    }
     container.appendChild(userMsg);
     scrollToBottom();
 
-    // Add to history
-    state.conversationHistory.push({ role: 'user', content: text });
+    // Add to history (clean text — matches what's displayed/restored later; the
+    // attachment content itself only affects this one turn's request, same
+    // one-turn-only scope as core.js's auto-injected project context).
+    state.conversationHistory.push({ role: 'user', content: displayText });
 
     // Auto-create chat if none active
     if (!state.activeChatId) {
-      await createNewChat(text.substring(0, 40).trim() || 'New Chat');
+      await createNewChat(displayText.substring(0, 40).trim() || 'New Chat');
     }
     // Auto-title if this is the first user message
     if (state.conversationHistory.filter(m => m.role === 'user').length === 1 && state.activeChatId) {
-      const autoTitle = text.substring(0, 40).trim() + (text.length > 40 ? '…' : '');
+      const autoTitle = displayText.substring(0, 40).trim() + (displayText.length > 40 ? '…' : '');
       await window.kode.updateChatTitle(state.activeChatId, autoTitle);
       await loadChatList();
     }
@@ -436,11 +583,20 @@
     container.appendChild(typingEl);
     scrollToBottom();
 
+    // Build what the model actually receives: the user's text plus each ready
+    // attachment's content (already formatted with a "[Attached file/folder: ...]"
+    // header by main.js's get-attachment-content).
+    let messageToSend = text;
+    if (readyAttachments.length > 0) {
+      const attachmentText = readyAttachments.map(a => a.content).join('\n\n');
+      messageToSend = text ? `${text}\n\n${attachmentText}` : attachmentText;
+    }
+
     // Send to backend
     try {
       await window.kode.sendMessage(
         state.currentModel,
-        text,
+        messageToSend,
         state.conversationHistory.slice(0, -1), // history excludes the new message (already sent as 'message' param)
       );
     } catch (err) {
@@ -657,6 +813,8 @@
     state.isGenerating = false;
     state.userHasScrolled = false;
     state.activeChatId = null;
+    state.attachments = [];
+    renderAttachments();
     setGeneratingUI(false);
     showWelcome();
     resetPlanProgress();
@@ -1178,6 +1336,8 @@
         state.currentAssistantEl = null;
         state.toolResults = [];
         state.isGenerating = false;
+        state.attachments = [];
+        renderAttachments();
         setGeneratingUI(false);
         resetPlanProgress(); // tool history (including any write_plan) isn't restored below, so neither is this
 

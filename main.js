@@ -11,6 +11,7 @@ const OpenAIClient = require('./src/openai/client');
 const AnthropicClient = require('./src/anthropic/client');
 const CustomClient = require('./src/custom/client');
 const AgentCore = require('./src/agent/core');
+const agentTools = require('./src/agent/tools'); // reused directly for reading file/folder attachments — see "Attachment Handlers" below
 
 // OpenRouter (https://openrouter.ai) is just an OpenAI-compatible aggregator — it's
 // wired up as a dedicated Settings tab (instead of making users configure the
@@ -158,6 +159,53 @@ function compareVersions(a, b) {
     if (numA < numB) return -1;
   }
   return 0;
+}
+
+/**
+ * Recursively builds a { name, path, type, children?/size? } tree for a directory,
+ * depth-limited and skipping hidden files/node_modules/etc. Shared by the project
+ * sidebar's 'list-file-tree' IPC handler and the "attach a folder" feature below
+ * (get-attachment-content), so both present the exact same view of a folder.
+ */
+function buildFileTree(dirPath, depth, maxDepth) {
+  if (depth > maxDepth) return [];
+  try {
+    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    const filtered = entries.filter(e => !e.name.startsWith('.') && e.name !== 'node_modules' && e.name !== '__pycache__' && e.name !== '.git');
+    filtered.sort((a, b) => {
+      if (a.isDirectory() && !b.isDirectory()) return -1;
+      if (!a.isDirectory() && b.isDirectory()) return 1;
+      return a.name.localeCompare(b.name);
+    });
+    return filtered.map(entry => {
+      const fullPath = path.join(dirPath, entry.name);
+      if (entry.isDirectory()) {
+        return { name: entry.name, path: fullPath, type: 'directory', children: buildFileTree(fullPath, depth + 1, maxDepth) };
+      }
+      try {
+        const stats = fs.statSync(fullPath);
+        return { name: entry.name, path: fullPath, type: 'file', size: stats.size };
+      } catch {
+        return { name: entry.name, path: fullPath, type: 'file', size: 0 };
+      }
+    });
+  } catch {
+    return [];
+  }
+}
+
+/** Renders a buildFileTree() result as an indented plain-text tree, for injecting a folder attachment's contents as text context for the model. */
+function formatFileTreeAsText(tree, indent = '') {
+  return tree.map((entry) => {
+    if (entry.type === 'directory') {
+      const childText = entry.children && entry.children.length > 0
+        ? '\n' + formatFileTreeAsText(entry.children, indent + '  ')
+        : '';
+      return `${indent}📁 ${entry.name}/${childText}`;
+    }
+    const sizeLabel = entry.size < 1024 ? `${entry.size} B` : `${(entry.size / 1024).toFixed(1)} KB`;
+    return `${indent}📄 ${entry.name} (${sizeLabel})`;
+  }).join('\n');
 }
 
 let appSettings = loadSettings();
@@ -772,37 +820,69 @@ function registerIPCHandlers() {
    */
   ipcMain.handle('list-file-tree', async (event, rootPath, maxDepth = 3) => {
     if (!rootPath) return { success: false, error: 'No path provided' };
+    return { success: true, tree: buildFileTree(rootPath, 0, maxDepth), root: rootPath };
+  });
 
-    function buildTree(dirPath, depth) {
-      if (depth > maxDepth) return [];
-      try {
-        const entries = fs.readdirSync(dirPath, { withFileTypes: true });
-        // Filter out hidden files/dirs and node_modules, .git, etc.
-        const filtered = entries.filter(e => !e.name.startsWith('.') && e.name !== 'node_modules' && e.name !== '__pycache__' && e.name !== '.git');
-        // Sort dirs first
-        filtered.sort((a, b) => {
-          if (a.isDirectory() && !b.isDirectory()) return -1;
-          if (!a.isDirectory() && b.isDirectory()) return 1;
-          return a.name.localeCompare(b.name);
-        });
-        return filtered.map(entry => {
-          const fullPath = path.join(dirPath, entry.name);
-          if (entry.isDirectory()) {
-            return { name: entry.name, path: fullPath, type: 'directory', children: buildTree(fullPath, depth + 1) };
-          }
-          try {
-            const stats = fs.statSync(fullPath);
-            return { name: entry.name, path: fullPath, type: 'file', size: stats.size };
-          } catch {
-            return { name: entry.name, path: fullPath, type: 'file', size: 0 };
-          }
-        });
-      } catch {
-        return [];
-      }
+  // ─── Attachment Handlers ────────────────────────────────────────────────────
+  // "Attach file(s)" / "Attach folder" in the chat input (renderer: attach-file-btn /
+  // attach-folder-btn) — like Claude's own file-attachment UI, but reading straight
+  // off the local filesystem instead of an upload. The picked path(s) are read here
+  // and the renderer injects the returned text into that turn's message before
+  // sending — see setupAttachmentListeners()/sendMessage() in app.js.
+
+  /**
+   * Native multi-file picker for attachments.
+   */
+  ipcMain.handle('pick-attachment-files', async () => {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openFile', 'multiSelections'],
+      title: 'Attach File(s)',
+    });
+    if (result.canceled || result.filePaths.length === 0) {
+      return { success: false, canceled: true };
     }
+    return { success: true, paths: result.filePaths };
+  });
 
-    return { success: true, tree: buildTree(rootPath, 0), root: rootPath };
+  /**
+   * Native folder picker for attachments.
+   */
+  ipcMain.handle('pick-attachment-folder', async () => {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openDirectory'],
+      title: 'Attach Folder',
+    });
+    if (result.canceled || result.filePaths.length === 0) {
+      return { success: false, canceled: true };
+    }
+    return { success: true, path: result.filePaths[0] };
+  });
+
+  /**
+   * Reads an attached path — a file's content (via agent/tools.js's own read_file,
+   * so behavior — the 50KB cap, the "📄 path (size):" header — exactly matches what
+   * the agent itself sees when it calls read_file) or, for a folder, a text file
+   * tree (via buildFileTree/formatFileTreeAsText above, capped at depth 3 like the
+   * project sidebar) — so the model gets an overview without every file's full
+   * content being dumped in at once.
+   */
+  ipcMain.handle('get-attachment-content', async (event, attachedPath) => {
+    if (!attachedPath) return { success: false, error: 'No path provided' };
+    try {
+      if (!fs.existsSync(attachedPath)) {
+        return { success: false, error: 'File or folder not found' };
+      }
+      const stats = fs.statSync(attachedPath);
+      if (stats.isDirectory()) {
+        const tree = buildFileTree(attachedPath, 0, 3);
+        const text = tree.length > 0 ? formatFileTreeAsText(tree) : '(empty folder)';
+        return { success: true, type: 'folder', content: `[Attached folder: ${attachedPath}]\n${text}` };
+      }
+      const content = await agentTools.read_file({ path: attachedPath }, null);
+      return { success: true, type: 'file', content: `[Attached file: ${attachedPath}]\n${content}` };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
   });
 
   // ─── Settings Handlers ──────────────────────────────────────────────────────

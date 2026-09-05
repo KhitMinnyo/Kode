@@ -160,7 +160,11 @@
 
       <!-- Input Area -->
       <div class="input-area">
+        <!-- Staged attachments for the next message — see setupAttachmentListeners() in app.js -->
+        <div class="attachments-row" id="attachments-row" hidden></div>
         <div class="input-wrapper">
+          <button class="attach-btn" id="attach-file-btn" title="Attach file(s)">📎</button>
+          <button class="attach-btn" id="attach-folder-btn" title="Attach folder">📁</button>
           <textarea
             id="message-input"
             rows="1"

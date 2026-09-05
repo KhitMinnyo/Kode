@@ -151,6 +151,30 @@ contextBridge.exposeInMainWorld('kode', {
    */
   listFileTree: (rootPath, maxDepth) => ipcRenderer.invoke('list-file-tree', rootPath, maxDepth),
 
+  // ─── Attachment APIs ─────────────────────────────────────────────────────────
+  // "Attach file(s)" / "Attach folder" in the chat input, like Claude's own file
+  // attachment UI — see main.js's "Attachment Handlers" section.
+
+  /**
+   * Open a native dialog to pick one or more files to attach to the next message.
+   * @returns {Promise<{success: boolean, paths?: string[], canceled?: boolean}>}
+   */
+  pickAttachmentFiles: () => ipcRenderer.invoke('pick-attachment-files'),
+
+  /**
+   * Open a native dialog to pick a folder to attach to the next message.
+   * @returns {Promise<{success: boolean, path?: string, canceled?: boolean}>}
+   */
+  pickAttachmentFolder: () => ipcRenderer.invoke('pick-attachment-folder'),
+
+  /**
+   * Read an attached file's content or a folder's file tree, formatted as text
+   * ready to inject into a message.
+   * @param {string} attachedPath
+   * @returns {Promise<{success: boolean, type?: 'file'|'folder', content?: string, error?: string}>}
+   */
+  getAttachmentContent: (attachedPath) => ipcRenderer.invoke('get-attachment-content', attachedPath),
+
   // ─── Settings APIs ──────────────────────────────────────────────────────────
 
   /** Get current app settings. */
