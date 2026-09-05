@@ -1,10 +1,15 @@
-# Kode — AI Agent for Coding & Cybersecurity
+# Kode — AI Coding & Security Agent
 
 <p align="center">
   <img src="icon.png" width="128" height="128" alt="Kode Logo">
 </p>
 
-A native macOS desktop AI agent. Works with local [Ollama](https://ollama.ai) models, or cloud providers (OpenAI, Claude, DeepSeek, and any other OpenAI-compatible API) via Settings. Local models never send your code anywhere. Combines coding assistance — git-backed safety net, patch-based editing, semantic code search — with penetration-testing tools, project memory, and web research.
+**Kode is two agents in one app:**
+
+1. 🤖 **A coding agent** — like Claude Code or OpenCode. It reads your project, writes and edits files, runs commands, debugs failures, and keeps working until the task is actually done.
+2. 🛡️ **A security agent** — it audits *your own* source code for vulnerabilities (insecure patterns, missing validation, outdated dependencies) and, going further, runs real penetration-testing tools against systems you're authorized to test — matching findings to CVEs and producing a report with severity ratings and fixes.
+
+It's a native macOS desktop app. Run it fully offline with local [Ollama](https://ollama.ai) models — your code never leaves your machine — or connect it to OpenAI, Claude, DeepSeek, or any OpenAI-compatible cloud API.
 
 ## 📥 Install
 
@@ -18,9 +23,17 @@ xattr -cr /Applications/Kode.app
 ## ✨ Features
 
 ### 🤖 Coding Agent
-- Create files, edit code, run commands, debug errors
-- Plans before acting; `write_plan` tracks multi-step tasks
+- Create files, edit code, run commands, debug errors — plans first for complex tasks, then works through every step without stopping to ask "should I continue?"
 - Any Ollama model, or OpenAI / Anthropic / DeepSeek / custom OpenAI-compatible API
+- **Attach files or folders** to a message for extra context, the same way you'd attach files in Claude
+- **Live side panel** — tracks plan progress step-by-step and shows the project's file list as it changes, so you always know what the agent is doing
+
+### 🛡️ Security Agent
+- **Audits your codebase** — "audit this app" scans every file, flags vulnerabilities, insecure patterns, and missing validation, then fixes what it finds
+- **Real pentest tooling** — nmap, sqlmap, nikto, hydra, gobuster and more; auto-analyzes their output instead of just dumping it back at you
+- **CVE lookups** — matches software/service versions against the NVD database
+- **Full report generation** — findings rated by severity with CVSS scores and concrete remediation steps
+- **WAF/CDN bypass and bug bounty methodology** for authorized engagements
 
 ### 🛟 Safety Net
 - `git_checkpoint` / `git_revert` — snapshot and undo
@@ -31,13 +44,7 @@ xattr -cr /Applications/Kode.app
 ### 🔎 Semantic Code Search
 - `index_codebase` / `semantic_search` — find code by meaning, fully local (Ollama embeddings)
 
-### 🔓 Red Team / Pentest
-- Autonomous scan-and-analyze workflow
-- WAF/CDN bypass, bug bounty methodology
-- Auto-analyzes pasted nmap/nikto/sqlmap output
-- Pentest report generation with CVSS and remediation
-
-### 🛡️ Command Safety
+### 🔒 Command Safety
 - Blocks known-catastrophic commands outright (`rm -rf /`, fork bombs, etc.)
 - Confirms risky-but-legitimate patterns before running — toggle in Settings
 
