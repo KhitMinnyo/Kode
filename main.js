@@ -3,6 +3,7 @@
 const { app, BrowserWindow, ipcMain, dialog, nativeImage, shell, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const https = require('https');
 
 const OllamaClient = require('./src/ollama/client');
 const DeepSeekClient = require('./src/deepseek/client');
@@ -16,6 +17,10 @@ const AgentCore = require('./src/agent/core');
 // generic "Custom" provider by hand) purely because getting a key there is quick
 // and it fronts a huge range of models. Under the hood it's the same CustomClient,
 // just pre-pointed at OpenRouter's base URL so only an API key is needed.
+// Where Kode itself is published — used only for the lightweight "update available"
+// check below, not for anything user-configurable.
+const GITHUB_REPO = 'KhitMinnyo/Kode';
+
 const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 // OpenRouter fronts models with wildly different context windows (8K to 2M+); this
 // is a single reasonable guess used for history-budgeting when the exact model's
@@ -134,6 +139,25 @@ function saveSettings(newSettings) {
 
 function buildOllamaUrl(host, port) {
   return `http://${host || 'localhost'}:${port || 11434}`;
+}
+
+/**
+ * Compares two dotted version strings numerically, part by part (so "1.10.0" is
+ * correctly greater than "1.9.0" — a plain string/lexicographic compare would get
+ * that backwards). Missing parts count as 0, so "1.2" === "1.2.0".
+ * @returns {number} 1 if a > b, -1 if a < b, 0 if equal.
+ */
+function compareVersions(a, b) {
+  const partsA = String(a).split('.').map((n) => parseInt(n, 10) || 0);
+  const partsB = String(b).split('.').map((n) => parseInt(n, 10) || 0);
+  const len = Math.max(partsA.length, partsB.length);
+  for (let i = 0; i < len; i++) {
+    const numA = partsA[i] || 0;
+    const numB = partsB[i] || 0;
+    if (numA > numB) return 1;
+    if (numA < numB) return -1;
+  }
+  return 0;
 }
 
 let appSettings = loadSettings();
@@ -795,6 +819,60 @@ function registerIPCHandlers() {
    */
   ipcMain.handle('get-app-version', () => {
     return app.getVersion();
+  });
+
+  /**
+   * Check GitHub Releases for a newer version than the one currently running, so the
+   * UI can show a lightweight "update available" notice. This is a manual-download
+   * pointer, not a real silent auto-update: Kode ships unsigned (see the README's
+   * `xattr -cr` note), and macOS auto-update (electron-updater/Squirrel.Mac) requires
+   * the app to be code-signed — without paying for an Apple Developer ID to sign and
+   * notarize builds, an actual in-place auto-update wouldn't reliably work anyway.
+   * Fails silently (returns { error }) on any network issue — this should never block
+   * or nag the user, just quietly skip the notice.
+   */
+  ipcMain.handle('check-for-updates', () => {
+    return new Promise((resolve) => {
+      const options = {
+        hostname: 'api.github.com',
+        path: `/repos/${GITHUB_REPO}/releases/latest`,
+        method: 'GET',
+        headers: {
+          'User-Agent': 'Kode-App-Update-Check',
+          'Accept': 'application/vnd.github+json',
+        },
+        timeout: 8000,
+      };
+
+      const req = https.request(options, (res) => {
+        const chunks = [];
+        res.on('data', (chunk) => chunks.push(chunk));
+        res.on('end', () => {
+          try {
+            if (res.statusCode !== 200) {
+              resolve({ error: `GitHub returned HTTP ${res.statusCode}` });
+              return;
+            }
+            const data = JSON.parse(Buffer.concat(chunks).toString('utf-8'));
+            const latestVersion = String(data.tag_name || '').replace(/^v/i, '').trim();
+            const currentVersion = app.getVersion();
+            const updateAvailable = !!latestVersion && compareVersions(latestVersion, currentVersion) > 0;
+            resolve({
+              updateAvailable,
+              currentVersion,
+              latestVersion: latestVersion || null,
+              releaseUrl: data.html_url || `https://github.com/${GITHUB_REPO}/releases/latest`,
+            });
+          } catch (err) {
+            resolve({ error: err.message });
+          }
+        });
+      });
+
+      req.on('error', (err) => resolve({ error: err.message }));
+      req.on('timeout', () => { req.destroy(); resolve({ error: 'Request timed out' }); });
+      req.end();
+    });
   });
 
   /**

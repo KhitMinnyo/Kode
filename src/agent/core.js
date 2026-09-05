@@ -11,6 +11,16 @@ const { TOOL_SCHEMAS } = tools;
 // hitting the old ceiling before finishing.
 const MAX_TOOL_ITERATIONS = 25;
 
+// How many times in a row processMessage will auto-nudge the model to keep going (or
+// explicitly confirm it's done) instead of ending the turn — see the "stall" check
+// below. The system prompt asks the model to persist through multi-step tasks on its
+// own, but that's a request, not a guarantee: a model can still stop after doing real
+// work without saying so, which is exactly what looked like "does a little, then
+// stops" (the user had to send a follow-up before it would continue). This is the
+// code-level backstop for that — bounded so a model that never says "done" can't spin
+// the loop forever.
+const MAX_STALL_NUDGES = 3;
+
 // Buckets for the num_ctx we actually request from Ollama. Rather than always asking
 // for the model's full (capped) context window — which forces Ollama to allocate a
 // KV cache sized for the worst case on every single request — we size num_ctx to the
@@ -591,6 +601,7 @@ ${newlyDroppedText}`;
 
       let iteration = 0;
       let finalResponse = '';
+      let consecutiveStalls = 0; // see MAX_STALL_NUDGES
 
       while (iteration < MAX_TOOL_ITERATIONS) {
         iteration++;
@@ -717,11 +728,35 @@ ${newlyDroppedText}`;
             });
             continue; // retry
           }
+          // No tool calls attempted. If the model already did real work earlier THIS
+          // turn (allToolResults.length > 0) but stopped without the explicit "✅ Done"
+          // marker the system prompt asks for, don't just trust that it's actually
+          // finished — a plain summary that quietly stops partway through a multi-step
+          // task looks identical to one that's genuinely done. Nudge it to keep going
+          // (or say so explicitly) instead of silently ending the turn on the model's
+          // word alone. A simple direct answer with NO tool calls at all this turn
+          // (allToolResults.length === 0 — ordinary Q&A, nothing to "finish") is exempt,
+          // so this never forces tool use onto a plain conversational reply.
+          const hasDoneMarker = /✅/.test(currentResponse);
+          if (allToolResults.length > 0 && !hasDoneMarker && consecutiveStalls < MAX_STALL_NUDGES) {
+            consecutiveStalls++;
+            console.warn(`[AgentCore] Stopped without a "✅ Done" marker after doing tool work (stall ${consecutiveStalls}/${MAX_STALL_NUDGES}) — nudging to continue or confirm.`);
+            conversationHistory.push({ role: 'assistant', content: currentResponse });
+            conversationHistory.push({
+              role: 'user',
+              content: `You stopped without saying "✅ Done:" — is the task actually finished? If there's more to do, keep going right now and call the next tool yourself — don't wait for me to ask. If it's genuinely complete, say so explicitly starting with "✅ Done:" and summarize what changed.`,
+            });
+            continue; // retry
+          }
+
           // No tool calls attempted — we're done
           finalResponse = currentResponse;
           conversationHistory.push({ role: 'assistant', content: currentResponse });
           break;
         }
+
+        // There are tool calls — real progress happened, so reset the stall counter.
+        consecutiveStalls = 0;
 
         // There are tool calls — add assistant message to history
         conversationHistory.push({ role: 'assistant', content: currentResponse });

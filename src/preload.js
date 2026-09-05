@@ -168,6 +168,12 @@ contextBridge.exposeInMainWorld('kode', {
    */
   getAppVersion: () => ipcRenderer.invoke('get-app-version'),
 
+  /**
+   * Check GitHub Releases for a newer version than the one currently running.
+   * @returns {Promise<{updateAvailable: boolean, currentVersion: string, latestVersion: string|null, releaseUrl: string}|{error: string}>}
+   */
+  checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
+
   // ─── Persistent Memory APIs ──────────────────────────────────────────────
 
   /**

@@ -66,6 +66,17 @@
         </div>
       </div>
 
+      <!-- Update Notification — shown when a newer GitHub release exists.
+           Manual-download pointer only (no code-signed auto-update, see main.js). -->
+      <div class="update-banner" id="update-banner" hidden>
+        <span class="update-banner-text" id="update-banner-text"></span>
+        <div class="update-banner-actions">
+          <a class="update-banner-link" id="update-banner-link" href="#" target="_blank" rel="noopener">Get it</a>
+          <button class="update-banner-action" id="update-banner-not-now">Not now</button>
+          <button class="update-banner-action" id="update-banner-skip">Skip this version</button>
+        </div>
+      </div>
+
       <!-- Model Selector -->
       <div class="model-selector">
         <label for="model-select">Model</label>
@@ -229,7 +240,8 @@
               <option value="131072">131,072 (128K)</option>
               <option value="262144">262,144 (256K) — large-context models e.g. Qwen3.6</option>
             </select>
-            <span class="field-hint">💡 Kode never exceeds your model's own context limit or this cap — raise it only if your model supports it and your machine has the RAM/VRAM to spare. Higher values use more memory per request.</span>
+            <span class="field-hint" id="context-window-hint">💡 Kode never exceeds your model's own context limit or this cap — raise it only if your model supports it and your machine has the RAM/VRAM to spare. Higher values use more memory per request.</span>
+            <span class="field-hint field-hint-note" id="context-window-cloud-note" hidden></span>
           </div>
         </div>
 

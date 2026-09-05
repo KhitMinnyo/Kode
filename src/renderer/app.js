@@ -119,6 +119,8 @@
     setupProcessesListeners();
     setupCommandConfirmListener();
     loadAppVersion();
+    setupUpdateBanner();
+    checkForUpdates();
     await checkConnection();
     await loadModels();
     await loadProjectFolder();
@@ -141,6 +143,58 @@
       if (el && version) el.textContent = `v${version}`;
     } catch {
       // Non-critical — just leave the badge empty if this fails.
+    }
+  }
+
+  /**
+   * Wires up the two dismiss actions on the update-available banner (see index.html):
+   * "Not now" just hides it for this session — nothing is remembered, so it shows
+   * again next launch as long as this version is still the latest. "Skip this
+   * version" remembers the version so it never nags about that SAME release again,
+   * but still shows up once an even newer one is published.
+   */
+  function setupUpdateBanner() {
+    const banner = () => document.getElementById('update-banner');
+
+    document.getElementById('update-banner-not-now')?.addEventListener('click', () => {
+      const b = banner();
+      if (b) b.hidden = true;
+    });
+
+    document.getElementById('update-banner-skip')?.addEventListener('click', () => {
+      const b = banner();
+      if (!b) return;
+      try { localStorage.setItem('kode-dismissed-update-version', b.dataset.version || ''); } catch { /* ignore */ }
+      b.hidden = true;
+    });
+  }
+
+  /**
+   * Check GitHub Releases for a newer version and, if one exists and the user hasn't
+   * already dismissed that exact version, show the update banner with a link to it.
+   * Not a silent auto-update — see main.js's check-for-updates handler for why.
+   */
+  async function checkForUpdates() {
+    try {
+      const result = await window.kode.checkForUpdates();
+      if (!result || !result.updateAvailable || !result.latestVersion) return;
+
+      let dismissedVersion = '';
+      try { dismissedVersion = localStorage.getItem('kode-dismissed-update-version') || ''; } catch { /* ignore */ }
+      if (dismissedVersion === result.latestVersion) return;
+
+      const banner = document.getElementById('update-banner');
+      const text = document.getElementById('update-banner-text');
+      const link = document.getElementById('update-banner-link');
+      if (!banner || !text || !link) return;
+
+      text.textContent = `🔔 v${result.latestVersion} available`;
+      link.href = result.releaseUrl;
+      banner.dataset.version = result.latestVersion;
+      banner.hidden = false;
+    } catch {
+      // Non-critical — GitHub unreachable, rate-limited, offline, etc. Fail silently;
+      // never block startup or bother the user over a check that couldn't complete.
     }
   }
 

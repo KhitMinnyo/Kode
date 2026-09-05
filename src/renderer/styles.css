@@ -212,6 +212,60 @@ html, body {
   margin-top: 0;
 }
 
+/* ----- Update Notification ----- */
+.update-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 0 16px 14px;
+  padding: 10px;
+  background: var(--bg-glass);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+}
+
+.update-banner-text {
+  color: var(--text-secondary);
+}
+
+.update-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.update-banner-link {
+  color: var(--accent-secondary);
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.update-banner-link:hover {
+  text-decoration: underline;
+}
+
+/* "Not now" / "Skip this version" — secondary, text-link style so "Get it" stays
+   the one visually primary action in this tiny banner. */
+.update-banner-action {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-family: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  padding: 0;
+  white-space: nowrap;
+}
+
+.update-banner-action:hover {
+  color: var(--text-primary);
+}
+
 /* ----- Model Selector ----- */
 .model-selector {
   padding: 0 16px;

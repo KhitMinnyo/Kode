@@ -165,7 +165,9 @@ test('processMessage threads onConfirmCommand through to a risky run_command too
         };
       }
       // Second turn: after seeing the (blocked) tool result, the model just replies.
-      return { text: 'Understood, I will not run that.', toolCalls: [] };
+      // Includes the "✅ Done" marker core.js now looks for so the turn ends here
+      // instead of the stall-nudge retrying it (see MAX_STALL_NUDGES in core.js).
+      return { text: '✅ Done: understood, I will not run that command.', toolCalls: [] };
     },
   };
 
@@ -209,7 +211,7 @@ test('processMessage never consults onConfirmCommand when it is not provided (de
           toolCalls: [],
         };
       }
-      return { text: 'Done.', toolCalls: [] };
+      return { text: '✅ Done: ran echo hi.', toolCalls: [] };
     },
   };
 
@@ -262,7 +264,10 @@ test('processMessage asks the model to retry when a ```tool block is unparseable
       if (chatCallCount === 2) {
         return { text: 'Got it, retrying.\n```tool\n{"tool": "read_file", "params": {"path": "a.py"}}\n```', toolCalls: [] };
       }
-      return { text: 'Done.', toolCalls: [] };
+      // Includes the "✅ Done" marker core.js now looks for after a tool call, so the
+      // turn ends here in one shot rather than the stall-nudge retrying it (see
+      // MAX_STALL_NUDGES in core.js).
+      return { text: '✅ Done: read a.py.', toolCalls: [] };
     },
   };
 
@@ -286,7 +291,7 @@ test('processMessage threads the ollamaClient/embedClient into toolContext for s
       if (!messages.some(m => m.role === 'user' && m.content.startsWith('Tool results:'))) {
         return { text: '```tool\n{"tool": "semantic_search", "params": {"query": "auth"}}\n```', toolCalls: [] };
       }
-      return { text: 'Done.', toolCalls: [] };
+      return { text: '✅ Done: found the auth code.', toolCalls: [] };
     },
   };
 
