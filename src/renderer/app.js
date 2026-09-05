@@ -29,6 +29,9 @@
     _tokenCount: 0,
   };
 
+  /** Human-readable label per provider — shared by the connection status pill and Settings. */
+  const PROVIDER_LABELS = { ollama: 'Ollama', deepseek: 'DeepSeek', openai: 'OpenAI', anthropic: 'Claude', openrouter: 'OpenRouter', custom: 'Custom API' };
+
   /**
    * Basic debounce — delays invoking `fn` until `wait` ms have passed without
    * another call. Used to avoid firing a model-warmup request for every model the
@@ -160,7 +163,6 @@
     const label = statusLabel();
     if (!dot || !label) return;
 
-    const PROVIDER_LABELS = { ollama: 'Ollama', deepseek: 'DeepSeek', openai: 'OpenAI', anthropic: 'Claude', openrouter: 'OpenRouter', custom: 'Custom API' };
     const providerLabel = PROVIDER_LABELS[provider] || 'Ollama';
 
     if (connected) {
@@ -1600,6 +1602,25 @@
     document.getElementById('config-anthropic')?.classList.toggle('active', provider === 'anthropic');
     document.getElementById('config-openrouter')?.classList.toggle('active', provider === 'openrouter');
     document.getElementById('config-custom')?.classList.toggle('active', provider === 'custom');
+
+    // "Max Context Window" (agent/core.js's maxContextCap) only ever applies to Ollama
+    // — it exists purely to protect local RAM/VRAM from an oversized KV cache, and is
+    // silently ignored for every cloud provider (they always use the model's own real
+    // context window instead — see AgentCore._getContextSize). Without this, changing
+    // it while a cloud provider is selected looks like it does nothing, because it doesn't.
+    const isOllama = provider === 'ollama';
+    const contextSelect = document.getElementById('max-context-tokens');
+    const contextHint = document.getElementById('context-window-hint');
+    const cloudNote = document.getElementById('context-window-cloud-note');
+    if (contextSelect) contextSelect.disabled = !isOllama;
+    if (contextHint) contextHint.hidden = !isOllama;
+    if (cloudNote) {
+      cloudNote.hidden = isOllama;
+      if (!isOllama) {
+        const label = PROVIDER_LABELS[provider] || provider;
+        cloudNote.textContent = `ℹ️ This only applies to Ollama (local models) — it protects your machine's RAM/VRAM. ${label} always uses its model's own full context window automatically, so this setting has no effect here.`;
+      }
+    }
   }
 
   function getSelectedProvider() {

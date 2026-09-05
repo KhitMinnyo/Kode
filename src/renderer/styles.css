@@ -1714,6 +1714,19 @@ html, body {
   opacity: 0.8;
 }
 
+/* Shown instead of the regular hint when a control is inert for the selected provider
+   (e.g. "Max Context Window" only applies to Ollama) — accent-tinted so it reads as an
+   explanation for why the control is disabled, not just another passive tip. */
+.settings-field .field-hint-note {
+  color: var(--accent-secondary);
+  opacity: 1;
+}
+
+.settings-field select:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 /* Checkbox settings field (e.g. Safety → confirm risky commands) */
 .checkbox-label {
   display: flex;
