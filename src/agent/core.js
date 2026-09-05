@@ -199,6 +199,12 @@ class AgentCore {
     }
     this.ollamaClient = ollamaClient;
     this._isGenerating = false;
+    // AbortController for whatever tool call is currently in flight (run_command,
+    // run_tests) — see stopGeneration() below. A separate concern from
+    // this.ollamaClient.abort(), which only cancels the model's own request; without
+    // this, hitting Stop while a shell command was running couldn't do anything until
+    // that command's own (much longer) timeout elapsed on its own.
+    this._toolAbortController = null;
     this._contextSizeCache = {};  // model → context_size cache
     this.maxContextCap = maxContextCap; // user-configurable ceiling, see setMaxContextCap()
     this._contextSummaryCache = {};  // conversation fingerprint → { droppedCount, summary }
@@ -551,6 +557,7 @@ ${newlyDroppedText}`;
     }
 
     this._isGenerating = true;
+    this._toolAbortController = new AbortController();
     const allToolResults = [];
 
     try {
@@ -768,11 +775,14 @@ ${newlyDroppedText}`;
         // whichever of these they don't need, so it's safe to pass all of them
         // uniformly: confirmRiskyCommand (run_command), ollamaClient/embedClient
         // (index_codebase, semantic_search — embeddings only make sense against the
-        // local Ollama provider, so embedClient is null for cloud providers).
+        // local Ollama provider, so embedClient is null for cloud providers), signal
+        // (run_command/run_tests — lets Stop kill an in-flight shell command instead
+        // of only cancelling the model's own request).
         const toolContext = {
           confirmRiskyCommand: onConfirmCommand,
           ollamaClient: this.ollamaClient,
           embedClient: this.provider === 'ollama' ? this.ollamaClient : null,
+          signal: this._toolAbortController.signal,
         };
 
         for (const call of toolCalls) {
@@ -829,6 +839,7 @@ ${newlyDroppedText}`;
       }
 
       this._isGenerating = false;
+      this._toolAbortController = null;
       onStatus({ status: 'idle', message: '' });
 
       return {
@@ -837,16 +848,23 @@ ${newlyDroppedText}`;
       };
     } catch (err) {
       this._isGenerating = false;
+      this._toolAbortController = null;
       throw err;
     }
   }
 
   /**
-   * Stop the current generation.
+   * Stop the current generation. Cancels both the model's own request (via
+   * ollamaClient.abort()) and, if a shell command is currently running (run_command,
+   * run_tests), kills it immediately instead of leaving it to run out its own —
+   * much longer — timeout. See runShellCommandAsync in agent/tools.js.
    */
   stopGeneration() {
     this._isGenerating = false;
     this.ollamaClient.abort();
+    if (this._toolAbortController) {
+      try { this._toolAbortController.abort(); } catch { /* already aborted */ }
+    }
   }
 
   /**

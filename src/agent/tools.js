@@ -19,9 +19,10 @@ const DEFAULT_SHELL = process.platform === 'darwin' ? '/bin/zsh' : '/bin/bash';
 
 /**
  * fetch() has no default timeout — an unresponsive external API would otherwise hang
- * the whole agent loop indefinitely (run_command has its own timeout via execSync,
- * but the plain `fetch`-based tools didn't have an equivalent). Wraps fetch with an
- * AbortController so a slow/dead server fails fast with a clear message instead.
+ * the whole agent loop indefinitely (run_command/run_tests have their own timeout via
+ * runShellCommandAsync below, but the plain `fetch`-based tools didn't have an
+ * equivalent). Wraps fetch with an AbortController so a slow/dead server fails fast
+ * with a clear message instead.
  */
 async function fetchWithTimeout(url, options = {}, timeout = EXTERNAL_FETCH_TIMEOUT) {
   const controller = new AbortController();
@@ -306,6 +307,102 @@ async function read_file(params, projectFolder) {
 }
 
 /**
+ * Runs a shell command asynchronously (spawn) instead of with execSync.
+ *
+ * Why this exists: execSync blocks the ENTIRE Electron main process synchronously
+ * until the command exits or its timeout fires. While that's happening, nothing else
+ * in the app can run either — not the Stop button's IPC handler, not any other
+ * message, nothing — so a slow or hung command (a test suite waiting on a fixture, a
+ * script blocked on network I/O) froze the whole UI for the full timeout, and forever
+ * if the process ignored its kill signal. This runs the command off the sync path so
+ * the rest of the app keeps responding while it's in flight, and makes it genuinely
+ * killable: via `signal` (wired to the Stop button, see AgentCore.stopGeneration())
+ * and via its own timeout. Either kill kills the whole process group — not just the
+ * top-level shell — so a piped command (`cmd | tail`) doesn't leave orphaned
+ * processes still holding the pipe open after the shell itself is gone. If the
+ * process ignores SIGTERM (rare, but real), it's force-killed with SIGKILL shortly
+ * after so this can never hang forever.
+ *
+ * @returns {Promise<{stdout: string, stderr: string, code: number|null, timedOut: boolean, aborted: boolean}>}
+ */
+function runShellCommandAsync(command, { cwd, timeoutMs, maxBuffer = 2 * 1024 * 1024, signal } = {}) {
+  return new Promise((resolve, reject) => {
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    let timedOut = false;
+    let aborted = false;
+    let killTimer = null;
+    let hardKillTimer = null;
+    let onAbort = null;
+
+    let child;
+    try {
+      child = spawn(DEFAULT_SHELL, ['-c', command], {
+        cwd: cwd || process.cwd(),
+        detached: true, // own process group, so we can kill the whole pipeline below
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (err) {
+      reject(err);
+      return;
+    }
+
+    const killGroup = (sig) => {
+      if (!child.pid) return;
+      try { process.kill(-child.pid, sig); } catch { /* already dead, or never became a group leader */ }
+    };
+
+    const escalate = (reason) => {
+      if (reason === 'timeout') timedOut = true;
+      if (reason === 'abort') aborted = true;
+      killGroup('SIGTERM');
+      hardKillTimer = setTimeout(() => killGroup('SIGKILL'), 3000);
+    };
+
+    if (typeof timeoutMs === 'number' && timeoutMs > 0) {
+      killTimer = setTimeout(() => escalate('timeout'), timeoutMs);
+    }
+
+    if (signal) {
+      if (signal.aborted) {
+        setImmediate(() => escalate('abort'));
+      } else {
+        onAbort = () => escalate('abort');
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+    }
+
+    const cleanup = () => {
+      if (killTimer) clearTimeout(killTimer);
+      if (hardKillTimer) clearTimeout(hardKillTimer);
+      if (signal && onAbort) signal.removeEventListener('abort', onAbort);
+    };
+
+    child.stdout.on('data', (data) => {
+      if (stdout.length < maxBuffer) stdout += data.toString();
+    });
+    child.stderr.on('data', (data) => {
+      if (stderr.length < maxBuffer) stderr += data.toString();
+    });
+
+    child.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(err);
+    });
+
+    child.on('exit', (code) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve({ stdout, stderr, code, timedOut, aborted });
+    });
+  });
+}
+
+/**
  * Tool: run_command
  * Executes a shell command with a 30-second timeout and returns the output.
  *
@@ -315,6 +412,8 @@ async function read_file(params, projectFolder) {
  *   function — as in every other tool call, and in the default case where the user has
  *   turned Settings → Safety off — risky commands run exactly as before: auto-allowed
  *   with just a warning label, no confirmation step.
+ *   toolContext.signal - Optional AbortSignal; aborting it kills an in-flight command
+ *   immediately (wired to the Stop button — see AgentCore.stopGeneration()).
  */
 async function run_command(params, projectFolder, toolContext = {}) {
   const { command } = params;
@@ -490,16 +589,32 @@ async function run_command(params, projectFolder, toolContext = {}) {
       }
     }
 
-    const stdout = execSync(command, {
-      timeout: cmdTimeout,
-      encoding: 'utf-8',
-      shell: DEFAULT_SHELL,
+    const { stdout: rawStdout, stderr: rawStderr, code, timedOut, aborted } = await runShellCommandAsync(command, {
       cwd: projectFolder || process.cwd(),
+      timeoutMs: cmdTimeout,
       maxBuffer: 2 * 1024 * 1024, // 2MB for scan outputs
-      stdio: ['pipe', 'pipe', 'pipe'],
+      signal: toolContext.signal,
     });
 
-    const output = stdout.trim();
+    if (aborted) {
+      return `🛑 Command stopped by user:\n$ ${command}` +
+             (rawStdout.trim() ? `\n\nPartial output:\n${rawStdout.trim().substring(0, 2000)}` : '');
+    }
+
+    if (timedOut) {
+      return `⏱️ Command timed out after ${cmdTimeout / 1000} seconds:\n$ ${command}` +
+             (rawStdout.trim() ? `\n\nPartial output:\n${rawStdout.trim().substring(0, 2000)}` : '') +
+             (rawStderr.trim() ? `\n\nPartial stderr:\n${rawStderr.trim().substring(0, 1000)}` : '');
+    }
+
+    if (code !== 0) {
+      let result = `❌ Command failed (exit code ${code ?? 'unknown'}):\n$ ${command}`;
+      if (rawStdout.trim()) result += `\n\nstdout:\n${rawStdout.trim().substring(0, 2000)}`;
+      if (rawStderr.trim()) result += `\n\nstderr:\n${rawStderr.trim().substring(0, 2000)}`;
+      return result;
+    }
+
+    const output = rawStdout.trim();
     if (output.length === 0) {
       return `${riskWarning}✅ Command executed successfully (no output):\n$ ${command}`;
     }
@@ -508,20 +623,7 @@ async function run_command(params, projectFolder, toolContext = {}) {
     const truncated = output.length > maxLen ? output.substring(0, maxLen) + '\n\n... (output truncated)' : output;
     return `${riskWarning}✅ Command output:\n$ ${command}\n\n${truncated}`;
   } catch (err) {
-    const exitCode = err.status || 'unknown';
-    const stdout = (err.stdout || '').trim();
-    const stderr = (err.stderr || '').trim();
-
-    if (err.killed) {
-      return `⏱️ Command timed out after ${cmdTimeout / 1000} seconds:\n$ ${command}` +
-             (stdout ? `\n\nPartial output:\n${stdout.substring(0, 2000)}` : '') +
-             (stderr ? `\n\nPartial stderr:\n${stderr.substring(0, 1000)}` : '');
-    }
-
-    let result = `❌ Command failed (exit code ${exitCode}):\n$ ${command}`;
-    if (stdout) result += `\n\nstdout:\n${stdout.substring(0, 2000)}`;
-    if (stderr) result += `\n\nstderr:\n${stderr.substring(0, 2000)}`;
-    return result;
+    return `❌ Failed to run command: ${err.message}\n$ ${command}`;
   }
 }
 
@@ -918,33 +1020,41 @@ async function apply_patch(params = {}, projectFolder) {
  * assuming they work, which matters more for local models than cloud ones since
  * they're more prone to subtle mistakes.
  */
-async function run_tests(params = {}, projectFolder) {
+async function run_tests(params = {}, projectFolder, toolContext = {}) {
   const command = (params.command && String(params.command).trim()) || 'npm test';
   const TEST_TIMEOUT = 180000; // 3 minutes — test suites run longer than a typical command
 
   try {
-    const stdout = execSync(command, {
-      timeout: TEST_TIMEOUT,
-      encoding: 'utf-8',
-      shell: DEFAULT_SHELL,
+    const { stdout: rawStdout, stderr: rawStderr, code, timedOut, aborted } = await runShellCommandAsync(command, {
       cwd: projectFolder || process.cwd(),
+      timeoutMs: TEST_TIMEOUT,
       maxBuffer: 4 * 1024 * 1024,
-      stdio: ['pipe', 'pipe', 'pipe'],
+      signal: toolContext.signal,
     });
-    const output = stdout.trim();
+
+    if (aborted) {
+      return `🛑 Tests stopped by user:\n$ ${command}` +
+             (rawStdout.trim() ? `\n\nPartial output:\n${rawStdout.trim().substring(0, 3000)}` : '');
+    }
+
+    if (timedOut) {
+      return `⏱️ Tests timed out after ${TEST_TIMEOUT / 1000}s:\n$ ${command}` +
+             (rawStdout.trim() ? `\n\nPartial output:\n${rawStdout.trim().substring(0, 3000)}` : '');
+    }
+
+    if (code !== 0) {
+      let result = `❌ Tests failed (exit code ${code ?? 'unknown'}):\n$ ${command}`;
+      if (rawStdout.trim()) result += `\n\nstdout:\n${rawStdout.trim().substring(0, 3000)}`;
+      if (rawStderr.trim()) result += `\n\nstderr:\n${rawStderr.trim().substring(0, 2000)}`;
+      return result;
+    }
+
+    const output = rawStdout.trim();
     const maxLen = 6000;
     const truncated = output.length > maxLen ? output.substring(0, maxLen) + '\n\n... (output truncated)' : output;
     return `✅ Tests passed:\n$ ${command}\n\n${truncated || '(no output)'}`;
   } catch (err) {
-    if (err.killed) {
-      return `⏱️ Tests timed out after ${TEST_TIMEOUT / 1000}s:\n$ ${command}`;
-    }
-    const stdout = (err.stdout || '').trim();
-    const stderr = (err.stderr || '').trim();
-    let result = `❌ Tests failed (exit code ${err.status ?? 'unknown'}):\n$ ${command}`;
-    if (stdout) result += `\n\nstdout:\n${stdout.substring(0, 3000)}`;
-    if (stderr) result += `\n\nstderr:\n${stderr.substring(0, 2000)}`;
-    return result;
+    return `❌ Failed to run tests: ${err.message}\n$ ${command}`;
   }
 }
 

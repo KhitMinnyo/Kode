@@ -7,6 +7,7 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
+    "postinstall": "bash src/renderer/vendor/fetch-vendor-libs.sh || true",
     "build": "electron-builder --mac",
     "build:dmg": "electron-builder --mac dmg",
     "build:zip": "electron-builder --mac zip",

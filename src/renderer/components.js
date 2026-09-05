@@ -97,10 +97,21 @@
       const rawHtml = marked.parse(text || '');
       div.innerHTML = DOMPurify.sanitize(rawHtml);
     } else {
-      if (typeof DOMPurify === 'undefined') {
-        console.error('[Kode] DOMPurify failed to load — rendering as plain text instead of risking unsanitized HTML.');
-      }
-      div.textContent = text || '';
+      // marked/DOMPurify failed to load — most likely the vendor/*.js files described in
+      // src/renderer/vendor/README.md are missing on disk (they're gitignored and fetched
+      // by fetch-vendor-libs.sh; if that never ran, or ran without internet, they simply
+      // aren't there). Fail SAFE by rendering as plain text rather than ever risking
+      // unsanitized HTML — but make that visible in the UI, not just a devtools console
+      // nobody opens, since a silent fallback here is exactly what produced the
+      // "wall of un-formatted markdown" bug users saw before this warning existed.
+      console.error('[Kode] marked/DOMPurify failed to load — rendering as plain text instead of risking unsanitized HTML.');
+      const warning = document.createElement('div');
+      warning.className = 'markdown-fallback-warning';
+      warning.textContent = '⚠️ Formatting libraries didn\'t load, so this message is shown as plain text. Run "npm install" (or "bash src/renderer/vendor/fetch-vendor-libs.sh") with an internet connection, then restart Kode.';
+      div.appendChild(warning);
+      const textEl = document.createElement('div');
+      textEl.textContent = text || '';
+      div.appendChild(textEl);
     }
 
     // Syntax highlighting
@@ -150,6 +161,54 @@
   }
 
   /**
+   * truncateMiddle("a very long string", 20) → "a very l…g string" — keeps both ends
+   * (usually the informative parts of a path/URL/command) instead of just cutting
+   * off the end.
+   */
+  function truncateMiddle(str, max) {
+    if (!str) return '';
+    if (str.length <= max) return str;
+    const half = Math.max(1, Math.floor((max - 1) / 2));
+    return str.slice(0, half) + '…' + str.slice(str.length - half);
+  }
+
+  /**
+   * Produces a short, human-readable one-line summary of a tool call, shown by
+   * default in the collapsed tool-card header instead of a raw JSON dump of its
+   * params — e.g. "Ran: npm test" rather than { "command": "npm test" }, or
+   * "Created templates/404.html" rather than the file's full HTML content inline.
+   * The full params (and result) are still one click away — see .tool-params /
+   * .tool-result and the "expanded" toggle below — this only changes what shows up
+   * unasked, so the chat doesn't balloon into a wall of raw tool JSON.
+   */
+  function summarizeToolCall(toolName, params) {
+    const p = params || {};
+    switch (toolName) {
+      case 'create_file':      return p.path ? `Created ${p.path}` : 'Created file';
+      case 'edit_file':        return p.path ? `Edited ${p.path}` : 'Edited file';
+      case 'read_file':        return p.path ? `Read ${p.path}` : 'Read file';
+      case 'run_command':      return p.command ? `Ran: ${truncateMiddle(p.command, 70)}` : 'Ran command';
+      case 'run_tests':        return p.command ? `Ran tests: ${truncateMiddle(p.command, 60)}` : 'Ran tests';
+      case 'list_directory':   return p.path ? `Listed ${p.path}` : 'Listed directory';
+      case 'http_request':     return p.url ? `${(p.method || 'GET').toUpperCase()} ${truncateMiddle(p.url, 55)}` : 'HTTP request';
+      case 'search_files':     return p.pattern ? `Searched for "${truncateMiddle(p.pattern, 35)}"${p.path ? ` in ${p.path}` : ''}` : 'Searched files';
+      case 'firecrawl_scrape': return p.url ? `Scraped ${truncateMiddle(p.url, 55)}` : 'Scraped page';
+      case 'web_search':       return p.query ? `Searched web: "${truncateMiddle(p.query, 45)}"` : 'Web search';
+      case 'save_memory':      return p.key ? `Saved memory: ${p.key}` : 'Saved memory';
+      case 'recall_memory':    return p.query ? `Recalled memory: "${truncateMiddle(p.query, 35)}"` : 'Recalled memory';
+      case 'git_status':       return 'Checked git status';
+      case 'git_diff':         return p.path ? `Viewed diff — ${p.path}` : 'Viewed git diff';
+      case 'git_checkpoint':   return p.message ? `Checkpoint: ${truncateMiddle(p.message, 45)}` : 'Created git checkpoint';
+      case 'git_revert':       return p.file ? `Reverted ${p.file}` : (p.ref ? `Reverted to ${p.ref}` : 'Reverted changes');
+      case 'apply_patch':      return 'Applied patch';
+      case 'write_plan':       return `Updated plan${Array.isArray(p.steps) ? ` (${p.steps.length} step${p.steps.length === 1 ? '' : 's'})` : ''}`;
+      case 'index_codebase':   return 'Indexed codebase';
+      case 'semantic_search':  return p.query ? `Searched codebase: "${truncateMiddle(p.query, 35)}"` : 'Semantic search';
+      default:                 return toolName;
+    }
+  }
+
+  /**
    * createToolCard({ tool, params, result })
    */
   function createToolCard(toolExecution) {
@@ -169,7 +228,8 @@
 
     const name = document.createElement('span');
     name.className = 'tool-name';
-    name.textContent = meta.label;
+    name.textContent = summarizeToolCall(toolName, toolExecution.params);
+    name.title = meta.label; // full tool name on hover, since the summary replaces it
 
     const toggle = document.createElement('span');
     toggle.className = 'tool-toggle';

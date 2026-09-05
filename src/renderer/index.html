@@ -174,6 +174,34 @@
       </div>
 
     </main>
+
+    <!-- ======================== Right Panel ========================
+         Claude-app-style panel: current plan progress (from write_plan tool
+         calls) and a live view of the active project's files. -->
+    <aside class="right-panel" id="right-panel">
+
+      <div class="right-panel-section" id="plan-progress-section" hidden>
+        <div class="right-panel-section-title">
+          <span>📋 Plan Progress</span>
+        </div>
+        <div class="plan-progress-bar-track">
+          <div class="plan-progress-bar-fill" id="plan-progress-fill"></div>
+        </div>
+        <div class="plan-progress-label" id="plan-progress-label"></div>
+        <ul class="plan-progress-steps" id="plan-progress-steps"></ul>
+      </div>
+
+      <div class="right-panel-section">
+        <div class="right-panel-section-title">
+          <span>📁 Project Files</span>
+          <button class="right-panel-refresh-btn" id="right-panel-refresh-btn" title="Refresh file list">⟳</button>
+        </div>
+        <div id="right-panel-files">
+          <div class="right-panel-empty" id="right-panel-files-empty">No project open</div>
+        </div>
+      </div>
+
+    </aside>
   </div>
 
   <!-- ====================== Settings Modal ====================== -->

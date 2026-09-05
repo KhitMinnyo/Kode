@@ -104,6 +104,7 @@
   const chatTitle         = () => $('#chat-title');
   const newChatBtn        = () => $('#new-chat-btn');
   const openFolderBtn     = () => $('#open-folder-btn');
+  const rightPanelFiles   = () => $('#right-panel-files');
 
   /* ==========================================================
      Initialisation
@@ -475,6 +476,7 @@
       removeTypingIndicator();
 
       state.toolResults.push(toolExec);
+      handleToolExecutionForRightPanel(toolExec);
 
       // Ensure assistant element exists
       if (!state.currentAssistantEl) {
@@ -657,6 +659,7 @@
     state.activeChatId = null;
     setGeneratingUI(false);
     showWelcome();
+    resetPlanProgress();
     // Deselect active chat in list
     document.querySelectorAll('.chat-item').forEach(el => el.classList.remove('active'));
   }
@@ -667,6 +670,8 @@
   function setupFolderListeners() {
     const btn = openFolderBtn();
     if (btn) btn.addEventListener('click', addProject);
+    const rightRefreshBtn = document.getElementById('right-panel-refresh-btn');
+    if (rightRefreshBtn) rightRefreshBtn.addEventListener('click', refreshRightPanelFiles);
   }
 
   async function addProject() {
@@ -676,6 +681,7 @@
         state.projects = result.projects;
         state.activeProjectIndex = result.activeIndex;
         renderProjectsList();
+        refreshRightPanelFiles();
         // Auto-expand the newly added project
         const items = document.querySelectorAll('.project-item');
         const lastItem = items[result.activeIndex];
@@ -696,6 +702,7 @@
         state.projects = result.projects;
         state.activeProjectIndex = result.activeIndex;
         renderProjectsList();
+        refreshRightPanelFiles();
       }
     } catch (err) {
       console.error('Failed to remove project:', err);
@@ -712,6 +719,7 @@
           el.classList.toggle('active', i === state.activeProjectIndex);
         });
         await loadChatList();
+        refreshRightPanelFiles();
       }
     } catch (err) {
       console.error('Failed to set active project:', err);
@@ -725,6 +733,7 @@
         state.projects = result.projects;
         state.activeProjectIndex = result.activeIndex;
         renderProjectsList();
+        refreshRightPanelFiles();
       }
     } catch (err) {
       console.error('Failed to load projects:', err);
@@ -841,6 +850,108 @@
     if (input) {
       input.value = `Read the file: ${filePath}`;
       input.focus();
+    }
+  }
+
+  /* ==========================================================
+     Right Panel — plan progress + live project files
+     ========================================================== */
+
+  /**
+   * Refreshes the right panel's file tree for whichever project is currently
+   * active. Called on startup, whenever the active project changes, and (debounced)
+   * after any tool call that can change what's on disk (create_file, edit_file,
+   * apply_patch, git_revert) — so the list stays live without a manual reload.
+   */
+  async function refreshRightPanelFiles() {
+    const container = rightPanelFiles();
+    if (!container) return;
+
+    const project = state.projects[state.activeProjectIndex];
+    if (!project) {
+      container.innerHTML = '<div class="right-panel-empty" id="right-panel-files-empty">No project open</div>';
+      return;
+    }
+
+    try {
+      const result = await window.kode.listFileTree(project.path, 3);
+      if (result.success && result.tree && result.tree.length > 0) {
+        container.innerHTML = '';
+        container.appendChild(createFileTree(result.tree, handleFileClick));
+      } else {
+        container.innerHTML = '<div class="right-panel-empty">Empty folder</div>';
+      }
+    } catch (err) {
+      container.innerHTML = '<div class="right-panel-empty">Failed to load files</div>';
+      console.error('Right panel file tree error:', err);
+    }
+  }
+
+  const refreshRightPanelFilesDebounced = debounce(refreshRightPanelFiles, 500);
+
+  // Tool calls that can change what's on disk — worth a file-tree refresh.
+  const FILE_MUTATING_TOOLS = new Set(['create_file', 'edit_file', 'apply_patch', 'git_revert']);
+
+  /**
+   * Updates the right panel's plan-progress bar from a write_plan tool result, which
+   * looks like "📋 Plan (2/5 done):\n[x] step one\n[~] step two\n[ ] step three...".
+   * Parsed here rather than passed structured, since write_plan's return value is
+   * already a plain string (see agent/tools.js) and duplicating that shape over IPC
+   * wasn't worth it just for this display.
+   */
+  function updatePlanProgressFromResult(resultText) {
+    const section = document.getElementById('plan-progress-section');
+    const fill = document.getElementById('plan-progress-fill');
+    const label = document.getElementById('plan-progress-label');
+    const stepsEl = document.getElementById('plan-progress-steps');
+    if (!section || !fill || !label || !stepsEl) return;
+
+    const text = String(resultText || '');
+    const match = text.match(/Plan \((\d+)\/(\d+) done\)/);
+    if (!match) return;
+
+    const done = parseInt(match[1], 10);
+    const total = parseInt(match[2], 10);
+    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+
+    fill.style.width = `${pct}%`;
+    label.textContent = `${done} of ${total} steps done`;
+
+    stepsEl.innerHTML = '';
+    const lines = text.split('\n').slice(1); // drop the "📋 Plan (...)" header line
+    lines.forEach((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      const li = document.createElement('li');
+      if (trimmed.startsWith('[x]')) {
+        li.className = 'done';
+        li.textContent = trimmed.slice(3).trim();
+      } else if (trimmed.startsWith('[~]')) {
+        li.className = 'in-progress';
+        li.textContent = trimmed.slice(3).trim();
+      } else if (trimmed.startsWith('[ ]')) {
+        li.textContent = trimmed.slice(3).trim();
+      } else {
+        li.textContent = trimmed;
+      }
+      stepsEl.appendChild(li);
+    });
+
+    section.hidden = false;
+  }
+
+  /** Hides the plan-progress section — called when starting/switching to a chat with no plan of its own yet. */
+  function resetPlanProgress() {
+    const section = document.getElementById('plan-progress-section');
+    if (section) section.hidden = true;
+  }
+
+  /** Routes a tool-execution event to whichever right-panel section cares about it. */
+  function handleToolExecutionForRightPanel(toolExec) {
+    if (toolExec.tool === 'write_plan') {
+      updatePlanProgressFromResult(toolExec.result);
+    } else if (FILE_MUTATING_TOOLS.has(toolExec.tool)) {
+      refreshRightPanelFilesDebounced();
     }
   }
 
@@ -1068,6 +1179,7 @@
         state.toolResults = [];
         state.isGenerating = false;
         setGeneratingUI(false);
+        resetPlanProgress(); // tool history (including any write_plan) isn't restored below, so neither is this
 
         // Restore chat messages in UI
         const container = messagesContainer();
