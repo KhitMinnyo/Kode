@@ -385,18 +385,30 @@ class DeepSeekClient {
     // OpenAI-compatible, including how streamed tool_calls arrive in pieces.
     const toolCallAccumulator = {};
 
-    // First-token timeout: reasoning models can take minutes to think
-    const FIRST_TOKEN_TIMEOUT = 300000; // 5 minutes
-    const firstTokenTimeout = setTimeout(() => {
-      if (!firstTokenTime && this._abortController) {
-        console.warn('[DeepSeekClient] First-token timeout (5min) — aborting.');
-        this._abortController.abort();
-      }
-    }, FIRST_TOKEN_TIMEOUT);
+    // Stall timeout: aborts if the model goes silent for this long — whether that's
+    // before the first token, or in the middle of an otherwise-active stream (a
+    // connection can stall silently at any point, not just at the very start; a
+    // one-shot "first token" timeout that gets permanently disarmed after the first
+    // chunk arrives leaves everything after that point completely unbounded). Re-armed
+    // on every chunk received below, so it only fires after a genuine gap, never just
+    // because the overall response is long.
+    const STALL_TIMEOUT = 300000; // 5 minutes
+    let firstTokenTimeout = null;
+    const armStallTimeout = () => {
+      clearTimeout(firstTokenTimeout);
+      firstTokenTimeout = setTimeout(() => {
+        if (this._abortController) {
+          console.warn('[DeepSeekClient] Stream stalled for 5min — aborting.');
+          this._abortController.abort();
+        }
+      }, STALL_TIMEOUT);
+    };
+    armStallTimeout();
 
     try {
       let chunkCount = 0;
       await this._streamRequestWithRetry('POST', '/v1/chat/completions', requestBody, (chunk) => {
+        armStallTimeout();
         chunkCount++;
         // Debug: log first chunk structure
         if (chunkCount === 1) {

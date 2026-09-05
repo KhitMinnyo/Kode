@@ -270,13 +270,24 @@ class AnthropicClient {
     // accumulate per index, same idea as OpenAI's tool_calls streaming.
     const toolBlocks = {}; // index -> { id, name, jsonBuffer }
 
-    const FIRST_TOKEN_TIMEOUT = 300000;
-    const firstTokenTimeout = setTimeout(() => {
-      if (!firstTokenTime && this._abortController) this._abortController.abort();
-    }, FIRST_TOKEN_TIMEOUT);
+    // Stall timeout: aborts if the model goes silent for this long — whether that's
+    // before the first token, or in the middle of an otherwise-active stream (a
+    // one-shot "first token" timeout that gets permanently disarmed after the first
+    // chunk arrives leaves everything after that point completely unbounded). Re-armed
+    // on every event received below.
+    const STALL_TIMEOUT = 300000;
+    let firstTokenTimeout = null;
+    const armStallTimeout = () => {
+      clearTimeout(firstTokenTimeout);
+      firstTokenTimeout = setTimeout(() => {
+        if (this._abortController) this._abortController.abort();
+      }, STALL_TIMEOUT);
+    };
+    armStallTimeout();
 
     try {
       await this._streamRequestWithRetry('POST', '/v1/messages', requestBody, (event) => {
+        armStallTimeout();
         if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
           toolBlocks[event.index] = { id: event.content_block.id, name: event.content_block.name, jsonBuffer: '' };
           if (!firstTokenTime) { firstTokenTime = Date.now(); clearTimeout(firstTokenTimeout); }
