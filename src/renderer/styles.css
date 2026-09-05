@@ -59,6 +59,17 @@ html, body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* The browser's own default stylesheet hides [hidden] elements with a plain
+   (non-!important) `display: none`. Several components here set their own
+   `display: flex` on the same element (e.g. .update-banner, .attachments-row),
+   and an author rule always outranks a user-agent rule of equal specificity -
+   so without this, toggling `el.hidden = true` from JS silently does nothing
+   and the element stays visibly on screen. This one rule guarantees `hidden`
+   always wins, for every element, present or future. */
+[hidden] {
+  display: none !important;
+}
+
 /* ----- Custom Scrollbar ----- */
 ::-webkit-scrollbar {
   width: 6px;
