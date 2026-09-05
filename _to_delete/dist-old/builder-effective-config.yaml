@@ -1,0 +1,60 @@
+directories:
+  output: dist
+  buildResources: build
+appId: com.kode.agent
+productName: Kode
+mac:
+  category: public.app-category.developer-tools
+  icon: icon.png
+  target:
+    - target: dmg
+      arch:
+        - universal
+  darkModeSupport: true
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+dmg:
+  title: Kode
+  backgroundColor: '#0f0f23'
+  contents:
+    - x: 130
+      'y': 220
+    - x: 410
+      'y': 220
+      type: link
+      path: /Applications
+linux:
+  target:
+    - target: deb
+      arch:
+        - x64
+        - arm64
+  category: Development
+  icon: icon.png
+  desktop:
+    entry:
+      Name: Kode
+      Comment: AI Coding & Cybersecurity Agent
+      Terminal: 'false'
+      Categories: Development;Utility;
+deb:
+  depends:
+    - libgtk-3-0
+    - libnotify4
+    - libnss3
+    - libxss1
+    - libxtst6
+    - xdg-utils
+    - libatspi2.0-0
+    - libuuid1
+    - libsecret-1-0
+  priority: optional
+files:
+  - filter:
+      - main.js
+      - icon.png
+      - src/**/*
+      - '!node_modules/.cache'
+electronVersion: 42.5.0
