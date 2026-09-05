@@ -125,6 +125,7 @@
     setupProcessesListeners();
     setupCommandConfirmListener();
     setupAttachmentListeners();
+    setupPanelResizers();
     loadAppVersion();
     setupUpdateBanner();
     checkForUpdates();
@@ -203,6 +204,81 @@
       // Non-critical — GitHub unreachable, rate-limited, offline, etc. Fail silently;
       // never block startup or bother the user over a check that couldn't complete.
     }
+  }
+
+  /**
+   * Wires up the two thin draggable dividers (see index.html's .panel-resizer
+   * elements) that let the user resize the left sidebar and the right project-files
+   * panel by dragging — the middle chat column just fills whatever space is left
+   * (it's `flex: 1`), so widening one side naturally narrows it back down.
+   * Widths are stored as CSS custom properties (--sidebar-width / --right-panel-width)
+   * on <html> and persisted to localStorage so they stick across restarts; falls back
+   * to the CSS defaults if localStorage is unavailable or empty.
+   */
+  function setupPanelResizers() {
+    const MIN_WIDTH = 200;
+    const MAX_WIDTH = 560;
+
+    const configs = [
+      { id: 'sidebar-resizer', cssVar: '--sidebar-width', storageKey: 'kode-sidebar-width', invert: false },
+      { id: 'right-panel-resizer', cssVar: '--right-panel-width', storageKey: 'kode-right-panel-width', invert: true },
+    ];
+
+    configs.forEach(({ id, cssVar, storageKey, invert }) => {
+      const handle = document.getElementById(id);
+      if (!handle) return;
+
+      // Restore a previously-saved width, if any.
+      try {
+        const saved = parseInt(localStorage.getItem(storageKey), 10);
+        if (Number.isFinite(saved) && saved >= MIN_WIDTH && saved <= MAX_WIDTH) {
+          document.documentElement.style.setProperty(cssVar, `${saved}px`);
+        }
+      } catch { /* ignore — just use the CSS default */ }
+
+      let startX = 0;
+      let startWidth = 0;
+
+      function onMouseMove(e) {
+        const delta = invert ? startX - e.clientX : e.clientX - startX;
+        const newWidth = Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, startWidth + delta));
+        document.documentElement.style.setProperty(cssVar, `${newWidth}px`);
+      }
+
+      function onMouseUp() {
+        document.removeEventListener('mousemove', onMouseMove);
+        document.removeEventListener('mouseup', onMouseUp);
+        handle.classList.remove('dragging');
+        document.body.classList.remove('resizing-panel');
+
+        const finalWidth = parseInt(
+          getComputedStyle(document.documentElement).getPropertyValue(cssVar),
+          10
+        );
+        try {
+          if (Number.isFinite(finalWidth)) localStorage.setItem(storageKey, String(finalWidth));
+        } catch { /* non-critical — resizing still works this session */ }
+      }
+
+      handle.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        startX = e.clientX;
+        startWidth = parseInt(
+          getComputedStyle(document.documentElement).getPropertyValue(cssVar),
+          10
+        ) || 0;
+        handle.classList.add('dragging');
+        document.body.classList.add('resizing-panel');
+        document.addEventListener('mousemove', onMouseMove);
+        document.addEventListener('mouseup', onMouseUp);
+      });
+
+      // Double-click to reset back to the CSS default.
+      handle.addEventListener('dblclick', () => {
+        document.documentElement.style.removeProperty(cssVar);
+        try { localStorage.removeItem(storageKey); } catch { /* ignore */ }
+      });
+    });
   }
 
   /* ==========================================================
