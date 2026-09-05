@@ -228,11 +228,88 @@ function getActiveClient() {
   }
 }
 
-// Bind to whichever provider was actually selected at startup (getActiveClient()),
-// not always the local Ollama client — otherwise, on relaunch with a cloud provider
-// already selected in settings, the agent would keep talking to Ollama (mismatched
-// against its own this.provider tag) until the user re-opened and re-saved Settings.
-const agentCore = new AgentCore(getActiveClient(), appSettings.maxContextTokens, appSettings.provider);
+// ─── Per-Tab Agent Registry ──────────────────────────────────────────────────
+// "True parallel tabs": each open tab gets its OWN AgentCore + its OWN LLM client
+// instance, so N tabs can generate / run tools fully concurrently without racing
+// on shared mutable state. This matters because both AgentCore (_isGenerating,
+// _toolAbortController, context-size caches) and every LLM client class (a single
+// mutable this._abortController field, reassigned per chat() call and nulled by
+// abort() — see e.g. src/ollama/client.js) are NOT safe for two callers to share
+// at once: two tabs sharing one instance would stomp each other's abort/stop and
+// corrupt each other's in-flight state. The 6 module-level clients above remain
+// exactly as before and are still used for quick, one-shot, non-concurrent calls
+// that don't need isolation (list-models, check-connection, warm-model,
+// test-connection) — only actual message generation goes through a tab's own pair.
+const tabAgents = new Map(); // tabId -> { agentCore, client, provider }
+
+/** Builds a brand-new client instance for whichever provider is currently active. */
+function createClientForActiveProvider() {
+  switch (appSettings.provider) {
+    case 'deepseek': return new DeepSeekClient(appSettings.deepseekApiKey || '');
+    case 'openai': return new OpenAIClient(appSettings.openaiApiKey || '');
+    case 'anthropic': return new AnthropicClient(appSettings.anthropicApiKey || '');
+    case 'openrouter': return new CustomClient(appSettings.openrouterApiKey || '', OPENROUTER_BASE_URL, OPENROUTER_DEFAULT_CONTEXT_SIZE);
+    case 'custom': return new CustomClient(appSettings.customApiKey || '', appSettings.customBaseUrl || '', appSettings.customContextSize || 32768);
+    default: return new OllamaClient(buildOllamaUrl(appSettings.ollamaHost, appSettings.ollamaPort));
+  }
+}
+
+/** Applies the current appSettings to an EXISTING client instance in place (same fields the 6 module-level clients get updated with in save-settings below). */
+function applySettingsToClient(client, provider) {
+  switch (provider) {
+    case 'deepseek': client.updateApiKey(appSettings.deepseekApiKey || ''); break;
+    case 'openai': client.updateApiKey(appSettings.openaiApiKey || ''); break;
+    case 'anthropic': client.updateApiKey(appSettings.anthropicApiKey || ''); break;
+    case 'openrouter': client.updateApiKey(appSettings.openrouterApiKey || ''); break;
+    case 'custom':
+      client.updateApiKey(appSettings.customApiKey || '');
+      client.updateBaseUrl(appSettings.customBaseUrl || '');
+      client.updateContextSize(appSettings.customContextSize || 32768);
+      break;
+    default: client.updateBaseUrl(buildOllamaUrl(appSettings.ollamaHost, appSettings.ollamaPort));
+  }
+}
+
+/** Gets (lazily creating) the { agentCore, client } pair for a given tab. */
+function getOrCreateTabAgent(tabId) {
+  let entry = tabAgents.get(tabId);
+  if (!entry) {
+    const client = createClientForActiveProvider();
+    const agentCore = new AgentCore(client, appSettings.maxContextTokens, appSettings.provider);
+    entry = { agentCore, client, provider: appSettings.provider };
+    tabAgents.set(tabId, entry);
+  }
+  return entry;
+}
+
+/** Stops any in-flight generation for a tab and discards its agent/client. Call when a tab is closed. */
+function removeTabAgent(tabId) {
+  const entry = tabAgents.get(tabId);
+  if (!entry) return;
+  try { entry.agentCore.stopGeneration(); } catch { /* already idle */ }
+  tabAgents.delete(tabId);
+}
+
+/**
+ * Called from the save-settings handler: propagates the (possibly changed)
+ * provider/keys/context-cap to every currently-open tab's own AgentCore + client,
+ * mirroring what previously happened to the single shared instance. A tab whose
+ * provider didn't change gets its existing client reconfigured in place (so a
+ * mid-flight generation keeps running against the same object); a tab whose
+ * provider DID change gets a fresh client + AgentCore for the new provider.
+ */
+function reconfigureTabAgentsOnSettingsChange() {
+  for (const [tabId, entry] of tabAgents.entries()) {
+    if (entry.provider === appSettings.provider) {
+      applySettingsToClient(entry.client, entry.provider);
+      entry.agentCore.setMaxContextCap(appSettings.maxContextTokens);
+    } else {
+      const client = createClientForActiveProvider();
+      const agentCore = new AgentCore(client, appSettings.maxContextTokens, appSettings.provider);
+      tabAgents.set(tabId, { agentCore, client, provider: appSettings.provider });
+    }
+  }
+}
 
 // ─── Chat Storage ────────────────────────────────────────────────────────────
 const CHATS_FILE = path.join(app.getPath('userData'), 'kode-chats.json');
@@ -314,7 +391,7 @@ function getActiveProjectFolder() {
  * is gone or nobody responds within CONFIRM_COMMAND_TIMEOUT_MS, fails safe by denying
  * the command rather than hanging the agent loop forever.
  */
-function makeConfirmCommandCallback(sender) {
+function makeConfirmCommandCallback(sender, tabId) {
   if (!appSettings.confirmRiskyCommands) return null;
 
   return (command, label) => {
@@ -332,7 +409,7 @@ function makeConfirmCommandCallback(sender) {
         resolve(approved);
       });
 
-      sender.send('confirm-command-request', { requestId, command, label });
+      sender.send('confirm-command-request', { requestId, command, label, tabId });
     });
   };
 }
@@ -510,9 +587,22 @@ function registerIPCHandlers() {
   /**
    * Send a message to the agent with streaming support.
    * Streams tokens and tool executions back to the renderer via events.
+   *
+   * `tabId` selects which tab's independent AgentCore+client instance handles this
+   * message (see the "Per-Tab Agent Registry" section above) — this is what makes
+   * multiple tabs able to generate fully in parallel. Every streamed event carries
+   * the same `tabId` back so the renderer can route it to the right tab even if a
+   * different tab is currently focused. `projectPath` is the calling tab's own
+   * active project folder; it's passed explicitly (rather than read from the old
+   * single global "active project") because with multiple tabs open at once, the
+   * globally-focused project and the project THIS message is actually for can
+   * differ. Falls back to the legacy global active project only if omitted, for
+   * safety.
    */
-  ipcMain.handle('send-message', async (event, { model, message, history }) => {
+  ipcMain.handle('send-message', async (event, { tabId, model, message, history, projectPath }) => {
     const sender = event.sender;
+    const effectiveTabId = tabId || 'default';
+    const { agentCore } = getOrCreateTabAgent(effectiveTabId);
 
     // Deep-clone history to avoid mutation issues with IPC serialization
     const conversationHistory = Array.isArray(history)
@@ -520,8 +610,9 @@ function registerIPCHandlers() {
       : [];
 
     try {
-        // Get active project folder for tool execution
-        const activeFolder = getActiveProjectFolder();
+        // Prefer the calling tab's own project folder; fall back to the legacy
+        // global "active project" only when the caller didn't pass one.
+        const activeFolder = projectPath || getActiveProjectFolder();
 
         const result = await agentCore.processMessage(
           message,
@@ -530,13 +621,14 @@ function registerIPCHandlers() {
           // onToken callback — stream each token to the renderer
           (token) => {
             if (!sender.isDestroyed()) {
-              sender.send('stream-token', token);
+              sender.send('stream-token', { tabId: effectiveTabId, token });
             }
           },
           // onToolExecution callback — notify renderer of tool usage
           (toolExecution) => {
             if (!sender.isDestroyed()) {
               sender.send('tool-execution', {
+                tabId: effectiveTabId,
                 tool: toolExecution.tool,
                 params: toolExecution.params,
                 result: toolExecution.result,
@@ -547,25 +639,26 @@ function registerIPCHandlers() {
           // onStatus callback — forward agent status to renderer
           (statusUpdate) => {
             if (!sender.isDestroyed()) {
-              sender.send('agent-status', statusUpdate);
+              sender.send('agent-status', { tabId: effectiveTabId, ...statusUpdate });
             }
           },
           // onConfirmCommand callback — ask the renderer to approve/block a risky
           // run_command pattern before it executes (null/skipped when the user has
           // turned the Settings → Safety toggle off).
-          makeConfirmCommandCallback(sender)
+          makeConfirmCommandCallback(sender, effectiveTabId)
         );
 
       // Notify renderer that streaming is complete
       if (!sender.isDestroyed()) {
         sender.send('stream-end', {
+          tabId: effectiveTabId,
           response: result.response,
           toolResults: result.toolResults,
         });
       }
 
       if (!sender.isDestroyed()) {
-        sender.send('agent-status', { status: 'idle', message: '' });
+        sender.send('agent-status', { tabId: effectiveTabId, status: 'idle', message: '' });
       }
 
       return {
@@ -588,8 +681,8 @@ function registerIPCHandlers() {
       }
 
       if (!sender.isDestroyed()) {
-        sender.send('stream-error', { error: userMessage });
-        sender.send('agent-status', { status: 'idle', message: '' });
+        sender.send('stream-error', { tabId: effectiveTabId, error: userMessage });
+        sender.send('agent-status', { tabId: effectiveTabId, status: 'idle', message: '' });
       }
 
       return {
@@ -619,16 +712,27 @@ function registerIPCHandlers() {
   });
 
   /**
-   * Stop the current generation
+   * Stop the current generation for a specific tab (see the Per-Tab Agent
+   * Registry above) — other tabs keep generating uninterrupted.
    */
-  ipcMain.handle('stop-generation', async () => {
+  ipcMain.handle('stop-generation', async (event, tabId) => {
     try {
-      agentCore.stopGeneration();
+      const entry = tabAgents.get(tabId || 'default');
+      if (entry) entry.agentCore.stopGeneration();
       return { success: true };
     } catch (err) {
       console.error('[IPC:stop-generation] Error:', err.message);
       return { success: false, error: err.message };
     }
+  });
+
+  /**
+   * Close a tab: stops any in-flight generation for it and discards its
+   * AgentCore + client instance so they can be garbage-collected.
+   */
+  ipcMain.handle('close-tab', (event, tabId) => {
+    removeTabAgent(tabId);
+    return { success: true };
   });
 
   /**
@@ -975,12 +1079,9 @@ function registerIPCHandlers() {
       customClient.updateBaseUrl(appSettings.customBaseUrl || '');
       customClient.updateContextSize(appSettings.customContextSize || 32768);
 
-      // Update AgentCore's client reference + provider tag based on the selected provider
-      agentCore.ollamaClient = getActiveClient();
-      agentCore.setProvider(appSettings.provider);
-
-      // Apply the (possibly changed) context-size ceiling
-      agentCore.setMaxContextCap(appSettings.maxContextTokens);
+      // Propagate the (possibly changed) provider/keys/context-cap to every open
+      // tab's own AgentCore + client — see the Per-Tab Agent Registry above.
+      reconfigureTabAgentsOnSettingsChange();
 
       return { success: true, settings: appSettings };
     } catch (err) {
@@ -1041,7 +1142,9 @@ app.on('window-all-closed', () => {
   }
 });
 
-// Graceful shutdown
+// Graceful shutdown — stop generation in every open tab, not just one.
 app.on('before-quit', () => {
-  agentCore.stopGeneration();
+  for (const { agentCore } of tabAgents.values()) {
+    try { agentCore.stopGeneration(); } catch { /* ignore — already idle */ }
+  }
 });

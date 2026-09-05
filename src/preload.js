@@ -17,21 +17,38 @@ contextBridge.exposeInMainWorld('kode', {
 
   /**
    * Send a message to the AI agent.
-   * Streaming tokens and tool executions are delivered via event callbacks.
+   * Streaming tokens and tool executions are delivered via event callbacks, each
+   * tagged with the same `tabId` so the renderer can route them to the right tab
+   * — see main.js's "Per-Tab Agent Registry" for why: each tab runs its own
+   * AgentCore + LLM client instance, so multiple tabs can generate truly in
+   * parallel without interfering with each other.
+   * @param {string} tabId - Which tab this message belongs to (its own AgentCore
+   *   instance is created lazily on first use). Pass a stable per-tab id.
    * @param {string} model - The model name
    * @param {string} message - The user message
    * @param {Array<{role: string, content: string}>} history - Conversation history
+   * @param {string} [projectPath] - The tab's own active project folder (falls
+   *   back to the legacy global active project if omitted)
    * @returns {Promise<{response: string, toolResults: Array}>}
    */
-  sendMessage: (model, message, history) => {
-    return ipcRenderer.invoke('send-message', { model, message, history });
+  sendMessage: (tabId, model, message, history, projectPath) => {
+    return ipcRenderer.invoke('send-message', { tabId, model, message, history, projectPath });
   },
 
   /**
-   * Stop the current generation.
+   * Stop the current generation for a specific tab. Other tabs keep generating.
+   * @param {string} tabId
    * @returns {Promise<void>}
    */
-  stopGeneration: () => ipcRenderer.invoke('stop-generation'),
+  stopGeneration: (tabId) => ipcRenderer.invoke('stop-generation', tabId),
+
+  /**
+   * Close a tab: stops any in-flight generation for it and discards its
+   * AgentCore + client instance on the main-process side.
+   * @param {string} tabId
+   * @returns {Promise<{success: boolean}>}
+   */
+  closeTab: (tabId) => ipcRenderer.invoke('close-tab', tabId),
 
   /**
    * Preload a model into Ollama's memory so the first real message responds faster.
@@ -42,19 +59,21 @@ contextBridge.exposeInMainWorld('kode', {
   warmModel: (model) => ipcRenderer.invoke('warm-model', model),
 
   /**
-   * Register a callback for streaming text tokens.
-   * @param {function(Event, string): void} callback
+   * Register a callback for streaming text tokens. Every tab's tokens flow through
+   * this same event, tagged with `tabId` — filter/route by `data.tabId` in the
+   * renderer to keep multiple tabs' streams from mixing.
+   * @param {function({tabId: string, token: string}): void} callback
    * @returns {function(): void} Cleanup function to remove the listener
    */
   onStreamToken: (callback) => {
-    const handler = (_event, token) => callback(token);
+    const handler = (_event, data) => callback(data);
     ipcRenderer.on('stream-token', handler);
     return () => ipcRenderer.removeListener('stream-token', handler);
   },
 
   /**
    * Register a callback for tool execution events.
-   * @param {function(Event, {tool: string, params: object, result: string}): void} callback
+   * @param {function({tabId: string, tool: string, params: object, result: string}): void} callback
    * @returns {function(): void} Cleanup function to remove the listener
    */
   onToolExecution: (callback) => {
@@ -65,7 +84,7 @@ contextBridge.exposeInMainWorld('kode', {
 
   /**
    * Register a callback for when streaming ends.
-   * @param {function(Event, {response: string, toolResults: Array}): void} callback
+   * @param {function({tabId: string, response: string, toolResults: Array}): void} callback
    * @returns {function(): void} Cleanup function to remove the listener
    */
   onStreamEnd: (callback) => {
@@ -76,7 +95,7 @@ contextBridge.exposeInMainWorld('kode', {
 
   /**
    * Register a callback for stream errors.
-   * @param {function(Event, {error: string}): void} callback
+   * @param {function({tabId: string, error: string}): void} callback
    * @returns {function(): void} Cleanup function to remove the listener
    */
   onStreamError: (callback) => {
@@ -85,7 +104,7 @@ contextBridge.exposeInMainWorld('kode', {
     return () => ipcRenderer.removeListener('stream-error', handler);
   },
 
-  /** Register a callback for agent status updates. */
+  /** Register a callback for agent status updates. Payload includes `tabId`. */
   onAgentStatus: (callback) => {
     const handler = (_event, data) => callback(data);
     ipcRenderer.on('agent-status', handler);
@@ -255,7 +274,7 @@ contextBridge.exposeInMainWorld('kode', {
   /**
    * Register a callback for when the agent wants to run a risky command and needs
    * approval. Respond with respondConfirmCommand(requestId, approved).
-   * @param {function({requestId: string, command: string, label: string}): void} callback
+   * @param {function({requestId: string, command: string, label: string, tabId: string}): void} callback
    * @returns {function(): void} Cleanup function to remove the listener
    */
   onConfirmCommandRequest: (callback) => {

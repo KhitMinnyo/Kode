@@ -145,6 +145,11 @@
     <!-- =================== Main Content ==================== -->
     <main class="main-content">
 
+      <!-- Tab strip — "true parallel tabs": each tab is an independent conversation
+           that can keep generating in the background while another is focused.
+           Built/kept in sync entirely by renderTabBar() in app.js. -->
+      <div class="tab-bar" id="tab-bar"></div>
+
       <!-- Chat Header (draggable title-bar region) -->
       <header class="chat-header">
         <span class="chat-header-title" id="chat-title">No model selected</span>

@@ -1122,6 +1122,111 @@ body.resizing-panel {
   position: relative;
 }
 
+/* ============================================================
+   Tab Bar — "true parallel tabs": each pill is an independent conversation
+   (its own AgentCore on the main-process side, see main.js) that can keep
+   generating in the background while a different one is focused. Built/kept
+   in sync by renderTabBar() in app.js.
+   ============================================================ */
+.tab-bar {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  padding: 8px 12px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  flex-shrink: 0;
+  -webkit-app-region: drag;
+}
+
+.tab-bar::-webkit-scrollbar {
+  height: 4px;
+}
+
+.tab-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px 6px 10px;
+  border-radius: 8px 8px 0 0;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border-glass);
+  border-bottom: none;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  cursor: pointer;
+  white-space: nowrap;
+  max-width: 200px;
+  flex-shrink: 0;
+  -webkit-app-region: no-drag;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.tab-pill:hover {
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text-primary);
+}
+
+.tab-pill.active {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+.tab-pill-icon {
+  font-size: 0.85em;
+  flex-shrink: 0;
+}
+
+.tab-pill-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tab-pill-busy {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-secondary);
+  flex-shrink: 0;
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.tab-pill-close {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  padding: 2px 3px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.tab-pill-close:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--text-primary);
+}
+
+.tab-bar-add-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 15px;
+  padding: 5px 10px;
+  border-radius: 6px 6px 0 0;
+  flex-shrink: 0;
+  margin-bottom: 1px;
+  -webkit-app-region: no-drag;
+}
+
+.tab-bar-add-btn:hover {
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text-primary);
+}
+
 /* ----- Chat Header ----- */
 .chat-header {
   height: var(--header-height);

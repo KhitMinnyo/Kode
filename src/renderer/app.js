@@ -12,24 +12,68 @@
   /* ==========================================================
      State
      ========================================================== */
+  // "True parallel tabs" (OpenCode-style): each open tab is an independent
+  // conversation with its own AgentCore on the main-process side (see main.js's
+  // "Per-Tab Agent Registry"), so N tabs can be generating simultaneously in the
+  // background while only ONE tab's content is ever rendered into the DOM at a
+  // time (the "active"/focused tab) — see renderTabMessages()/switchTab() below.
+  // Everything that used to be a single flat state field for "the current
+  // conversation" now lives on a per-tab object (see createTabState()); only
+  // things that are genuinely app-wide (the model dropdown's live selection, the
+  // shared project list, the shared chat list) stay directly on `state`.
   const state = {
     currentModel: null,
-    conversationHistory: [],   // { role, content }
-    isGenerating: false,
-    currentAssistantMessage: '',
-    currentAssistantEl: null,  // live DOM element during streaming
-    toolResults: [],           // accumulates during a single response
-    userHasScrolled: false,
-    projects: [],              // Array of { path, name }
-    activeProjectIndex: -1,
-    activeChatId: null,
+    tabs: [],                  // Array of per-tab conversation state — see createTabState()
+    activeTabIndex: -1,
+    projects: [],              // Array of { path, name } — shared across all tabs
+    activeChatId: null,        // mirrors the focused tab's chatId (sidebar "active" highlight)
+    activeProjectIndex: -1,    // mirrors the focused tab's projectIndex (sidebar highlight + the
+                               // Memory/Processes panels, which aren't tab-aware — see switchTab())
     chatList: [],              // Array of { id, title, model, createdAt, updatedAt, messageCount }
-    _statusTimer: null,
-    _statusStartTime: null,
-    _tokenCount: 0,
-    attachments: [],           // Staged files/folders for the next message: { id, path, name, type, content, status, error }
-    _attachmentIdCounter: 0,
+    _statusTimer: null,        // ONE shared interval; redraws the header from the focused tab's timer fields
   };
+
+  let _tabIdCounter = 0;
+
+  /**
+   * One entry per open tab — an independent conversation that can keep
+   * generating in the background while a different tab is focused. Everything
+   * a single conversation needs to track (history, in-flight streaming state,
+   * staged attachments, its own elapsed-time/token counters) lives here instead
+   * of on the shared `state` object, so two tabs never race on the same fields.
+   */
+  function createTabState({ projectIndex = -1, projectPath = null, projectName = null } = {}) {
+    return {
+      id: `tab_${Date.now().toString(36)}_${(_tabIdCounter++).toString(36)}`,
+      projectIndex,
+      projectPath,
+      projectName,
+      chatId: null,
+      model: null,
+      conversationHistory: [],   // { role, content }
+      isGenerating: false,
+      currentAssistantMessage: '',
+      currentAssistantEl: null,  // DOM element — detached while backgrounded, live in #messages-container once focused
+      toolResults: [],           // accumulates during a single response
+      attachments: [],           // Staged files/folders for the next message: { id, path, name, type, content, status, error }
+      _attachmentIdCounter: 0,
+      userHasScrolled: false,
+      planProgressResult: null, // raw write_plan result text, re-applied to the right panel on focus
+      lastError: null,          // set when a background tab's generation fails; surfaced once the user focuses it
+      _statusStartTime: null,
+      _tokenCount: 0,
+    };
+  }
+
+  /** The tab currently shown in #messages-container, or null before any tab exists. */
+  function activeTab() {
+    return state.tabs[state.activeTabIndex] || null;
+  }
+
+  /** Looks up a tab by id — used to route a tabId-tagged stream event to the right (possibly backgrounded) tab. */
+  function findTabById(tabId) {
+    return state.tabs.find((t) => t.id === tabId) || null;
+  }
 
   /** Human-readable label per provider — shared by the connection status pill and Settings. */
   const PROVIDER_LABELS = { ollama: 'Ollama', deepseek: 'DeepSeek', openai: 'OpenAI', anthropic: 'Claude', openrouter: 'OpenRouter', custom: 'Custom API' };
@@ -134,6 +178,21 @@
     await loadProjectFolder();
     setupFolderListeners();
     await loadChatList();
+
+    // Create the initial tab, bound to whichever project was active last
+    // session (loadProjectFolder() above restores state.activeProjectIndex
+    // from disk) — matches the pre-tabs app's startup behavior of showing the
+    // welcome screen with the last-used project already selected in the sidebar.
+    const restoredProject = state.activeProjectIndex >= 0 ? state.projects[state.activeProjectIndex] : null;
+    const initialTab = createTabState({
+      projectIndex: state.activeProjectIndex,
+      projectPath: restoredProject ? restoredProject.path : null,
+      projectName: restoredProject ? restoredProject.name : null,
+    });
+    initialTab.model = state.currentModel;
+    state.tabs.push(initialTab);
+    state.activeTabIndex = 0;
+    renderTabBar();
 
     // Retry connection check every 5 seconds
     setInterval(checkConnection, 5000);
@@ -403,6 +462,286 @@
   }
 
   /* ==========================================================
+     Tabs — one independent conversation per tab, any number of which can be
+     generating in the background at once. Only switchTab()/closeTab()/newTab()
+     ever touch #messages-container directly; everything else that streams in
+     for a tab (see setupStreamListeners()) updates that tab's own state and
+     only touches the DOM when that tab happens to be the focused one.
+     ========================================================== */
+
+  /** Rebuilds #messages-container from a tab's own history — the "load a conversation into view" step shared by switchTab()/loadChatIntoTab(). */
+  function renderTabMessages(tab) {
+    const container = messagesContainer();
+    if (!container) return;
+    container.innerHTML = '';
+
+    if (tab.conversationHistory.length === 0 && !tab.isGenerating) {
+      showWelcome();
+      return;
+    }
+
+    tab.conversationHistory.forEach((msg) => {
+      const el = createMessageElement(msg.role, msg.role === 'assistant' ? '' : msg.content);
+      if (msg.role === 'assistant') {
+        const bubble = el.querySelector('.message-bubble');
+        if (bubble) {
+          const md = renderMarkdown(msg.content);
+          bubble.innerHTML = '';
+          bubble.appendChild(md);
+        }
+      }
+      container.appendChild(el);
+    });
+
+    if (tab.isGenerating && tab.currentAssistantEl) {
+      // Re-attach the in-progress element that was being kept up to date while
+      // this tab was in the background — the user sees exactly where it's at.
+      container.appendChild(tab.currentAssistantEl);
+    } else if (tab.isGenerating) {
+      container.appendChild(createTypingIndicator());
+    }
+
+    scrollToBottom();
+  }
+
+  /** Re-applies a tab's cached plan-progress (from its last write_plan call) to the right panel, or hides the section if it never had one. */
+  function restorePlanProgress(tab) {
+    if (!tab.planProgressResult) {
+      resetPlanProgress();
+      return;
+    }
+    updatePlanProgressFromResult(tab.planProgressResult);
+  }
+
+  /** Draws the tab strip above the chat header. Re-render this any time a tab is added/removed/renamed or its busy state changes. */
+  function renderTabBar() {
+    const bar = document.getElementById('tab-bar');
+    if (!bar) return;
+    bar.innerHTML = '';
+
+    state.tabs.forEach((tab, index) => {
+      const pill = document.createElement('div');
+      pill.className = 'tab-pill' + (index === state.activeTabIndex ? ' active' : '');
+
+      const icon = document.createElement('span');
+      icon.className = 'tab-pill-icon';
+      icon.textContent = tab.projectIndex >= 0 ? '📁' : '💬';
+
+      const label = document.createElement('span');
+      label.className = 'tab-pill-label';
+      const chatMeta = tab.chatId ? state.chatList.find((c) => c.id === tab.chatId) : null;
+      label.textContent = tab.projectName || (chatMeta && chatMeta.title) || 'New Tab';
+      label.title = tab.projectPath || '';
+
+      const busy = document.createElement('span');
+      busy.className = 'tab-pill-busy';
+      busy.hidden = !tab.isGenerating;
+      busy.title = 'Generating…';
+
+      const close = document.createElement('button');
+      close.className = 'tab-pill-close';
+      close.textContent = '✕';
+      close.title = 'Close tab';
+
+      pill.append(icon, label, busy, close);
+
+      pill.addEventListener('click', (e) => {
+        if (e.target === close) return;
+        switchTab(index);
+      });
+      close.addEventListener('click', (e) => {
+        e.stopPropagation();
+        closeTab(index);
+      });
+
+      bar.appendChild(pill);
+    });
+
+    const addBtn = document.createElement('button');
+    addBtn.className = 'tab-bar-add-btn';
+    addBtn.title = 'New tab';
+    addBtn.textContent = '＋';
+    addBtn.addEventListener('click', () => newTab());
+    bar.appendChild(addBtn);
+  }
+
+  /**
+   * Focuses a different (already-open) tab: swaps which tab's state drives the
+   * DOM, without touching any other tab's in-flight generation.
+   */
+  async function switchTab(index) {
+    if (index === state.activeTabIndex) return;
+    if (index < 0 || index >= state.tabs.length) return;
+
+    state.activeTabIndex = index;
+    const tab = activeTab();
+    if (!tab) return;
+
+    // Mirror onto the legacy globals a few panels still read directly.
+    state.activeChatId = tab.chatId;
+    state.activeProjectIndex = tab.projectIndex;
+
+    if (tab.model) {
+      state.currentModel = tab.model;
+      const select = modelSelect();
+      if (select && select.querySelector(`option[value="${tab.model}"]`)) select.value = tab.model;
+    }
+    updateChatTitle();
+
+    // The Memory/Processes panels and a few other bits key off main.js's single
+    // global "active project" (they were never made tab-aware) — keep it synced
+    // to whichever tab now has focus so those panels show the right project.
+    if (tab.projectIndex >= 0) {
+      try { await window.kode.setActiveProject(tab.projectIndex); } catch { /* non-critical */ }
+    }
+
+    renderAttachments();
+    setGeneratingUI(tab, tab.isGenerating);
+    renderTabMessages(tab);
+    restorePlanProgress(tab);
+    refreshRightPanelFiles();
+    renderTabBar();
+
+    document.querySelectorAll('.chat-item').forEach((el) => {
+      el.classList.toggle('active', el.dataset.chatId === tab.chatId);
+    });
+    document.querySelectorAll('.project-item').forEach((el, i) => {
+      el.classList.toggle('active', i === tab.projectIndex);
+    });
+
+    if (tab.lastError) {
+      const err = tab.lastError;
+      tab.lastError = null;
+      appendError(err);
+    }
+  }
+
+  /** Opens a brand-new tab (optionally bound to a project and/or an existing chat) and focuses it. */
+  async function newTab({ projectIndex = -1, chatId = null } = {}) {
+    const project = projectIndex >= 0 ? state.projects[projectIndex] : null;
+    const tab = createTabState({
+      projectIndex,
+      projectPath: project ? project.path : null,
+      projectName: project ? project.name : null,
+    });
+    tab.model = state.currentModel;
+    state.tabs.push(tab);
+
+    // The new tab's index is always different from whatever's currently
+    // focused (it was just pushed onto the end), so switchTab()'s
+    // already-there guard never fires here — no special-casing needed.
+    await switchTab(state.tabs.length - 1);
+
+    if (chatId) {
+      await loadChatIntoTab(tab, chatId);
+    }
+    renderTabBar();
+    return tab;
+  }
+
+  /** Loads a saved chat's messages into a given tab (which may or may not currently be focused) and refreshes the DOM only if it is. */
+  async function loadChatIntoTab(tab, chatId) {
+    try {
+      const result = await window.kode.setActiveChat(chatId);
+      if (!result.success || !result.chat) return;
+
+      tab.chatId = result.chat.id;
+      tab.conversationHistory = result.chat.messages || [];
+      tab.currentAssistantMessage = '';
+      tab.currentAssistantEl = null;
+      tab.toolResults = [];
+      tab.isGenerating = false;
+      tab.attachments = [];
+      if (result.chat.model) tab.model = result.chat.model;
+
+      if (result.chat.projectPath) {
+        const pIndex = state.projects.findIndex((p) => p.path === result.chat.projectPath);
+        if (pIndex >= 0) {
+          tab.projectIndex = pIndex;
+          tab.projectPath = state.projects[pIndex].path;
+          tab.projectName = state.projects[pIndex].name;
+        }
+      }
+
+      if (tab === activeTab()) {
+        state.activeChatId = tab.chatId;
+        state.activeProjectIndex = tab.projectIndex;
+        renderAttachments();
+        setGeneratingUI(tab, false);
+        resetPlanProgress();
+        renderTabMessages(tab);
+
+        if (tab.model) {
+          const select = modelSelect();
+          if (select && select.querySelector(`option[value="${tab.model}"]`)) {
+            select.value = tab.model;
+            state.currentModel = tab.model;
+            updateChatTitle();
+          }
+        }
+
+        document.querySelectorAll('.chat-item').forEach((el) => {
+          el.classList.toggle('active', el.dataset.chatId === chatId);
+        });
+      }
+
+      renderTabBar();
+    } catch (err) {
+      console.error('Failed to load chat into tab:', err);
+    }
+  }
+
+  /** Focuses the tab already open for a project, binds an empty focused tab to it, or opens a new tab — used by the project sidebar's header click. */
+  async function openProjectTab(index) {
+    const existing = state.tabs.findIndex((t) => t.projectIndex === index);
+    if (existing >= 0) {
+      await switchTab(existing);
+      return;
+    }
+
+    const current = activeTab();
+    if (current && !current.isGenerating && current.projectIndex === -1 && !current.chatId && current.conversationHistory.length === 0) {
+      const project = state.projects[index];
+      if (!project) return;
+      current.projectIndex = index;
+      current.projectPath = project.path;
+      current.projectName = project.name;
+      state.activeProjectIndex = index;
+      try { await window.kode.setActiveProject(index); } catch { /* non-critical */ }
+      renderTabBar();
+      refreshRightPanelFiles();
+      return;
+    }
+
+    await newTab({ projectIndex: index });
+  }
+
+  /** Closes a tab: stops any in-flight generation for it on the main-process side, then focuses a neighboring tab (always keeping at least one tab open). */
+  async function closeTab(index) {
+    const tab = state.tabs[index];
+    if (!tab) return;
+
+    try { await window.kode.closeTab(tab.id); } catch { /* non-critical */ }
+
+    const wasActive = index === state.activeTabIndex;
+    state.tabs.splice(index, 1);
+
+    if (state.tabs.length === 0) {
+      await newTab();
+      return;
+    }
+
+    if (wasActive) {
+      const nextIndex = Math.min(index, state.tabs.length - 1);
+      state.activeTabIndex = -1; // force switchTab() to treat this as a real switch
+      await switchTab(nextIndex);
+    } else {
+      if (index < state.activeTabIndex) state.activeTabIndex--;
+      renderTabBar();
+    }
+  }
+
+  /* ==========================================================
      Input Handling
      ========================================================== */
   function setupInputListeners() {
@@ -439,6 +778,8 @@
     if (ms) {
       ms.addEventListener('change', (e) => {
         state.currentModel = e.target.value;
+        const tab = activeTab();
+        if (tab) tab.model = state.currentModel;
         updateChatTitle();
         // Warm the newly selected model in the background so it's ready by the time
         // the user actually sends a message. Debounced so quickly scrubbing through
@@ -449,12 +790,14 @@
       });
     }
 
-    // Scroll tracking — detect if user scrolled up
+    // Scroll tracking — detect if user scrolled up (per-tab, since each tab has its own scroll position)
     const mc = messagesContainer();
     if (mc) {
       mc.addEventListener('scroll', () => {
+        const tab = activeTab();
+        if (!tab) return;
         const { scrollTop, scrollHeight, clientHeight } = mc;
-        state.userHasScrolled = (scrollHeight - scrollTop - clientHeight) > 60;
+        tab.userHasScrolled = (scrollHeight - scrollTop - clientHeight) > 60;
       });
     }
   }
@@ -509,17 +852,21 @@
   }
 
   async function addAttachment(attachedPath) {
-    // Skip if this exact path is already staged
-    if (state.attachments.some(a => a.path === attachedPath)) return;
+    // Attachments are staged for whichever tab is focused at attach-time.
+    const tab = activeTab();
+    if (!tab) return;
 
-    const id = String(++state._attachmentIdCounter);
+    // Skip if this exact path is already staged
+    if (tab.attachments.some(a => a.path === attachedPath)) return;
+
+    const id = String(++tab._attachmentIdCounter);
     const name = attachedPath.split(/[\\/]/).pop() || attachedPath;
-    state.attachments.push({ id, path: attachedPath, name, type: null, content: null, status: 'loading', error: null });
+    tab.attachments.push({ id, path: attachedPath, name, type: null, content: null, status: 'loading', error: null });
     renderAttachments();
 
     try {
       const result = await window.kode.getAttachmentContent(attachedPath);
-      const entry = state.attachments.find(a => a.id === id);
+      const entry = tab.attachments.find(a => a.id === id);
       if (!entry) return; // removed while loading
       if (result.success) {
         entry.type = result.type;
@@ -530,7 +877,7 @@
         entry.error = result.error || 'Failed to read';
       }
     } catch (err) {
-      const entry = state.attachments.find(a => a.id === id);
+      const entry = tab.attachments.find(a => a.id === id);
       if (entry) {
         entry.status = 'error';
         entry.error = err.message || String(err);
@@ -540,20 +887,24 @@
   }
 
   function removeAttachment(id) {
-    state.attachments = state.attachments.filter(a => a.id !== id);
+    const tab = activeTab();
+    if (!tab) return;
+    tab.attachments = tab.attachments.filter(a => a.id !== id);
     renderAttachments();
   }
 
   function renderAttachments() {
     const row = attachmentsRow();
     if (!row) return;
+    const tab = activeTab();
+    const attachments = tab ? tab.attachments : [];
     row.innerHTML = '';
-    if (state.attachments.length === 0) {
+    if (attachments.length === 0) {
       row.hidden = true;
       return;
     }
     row.hidden = false;
-    state.attachments.forEach((a) => row.appendChild(createAttachmentChip(a, true)));
+    attachments.forEach((a) => row.appendChild(createAttachmentChip(a, true)));
   }
 
   /** Builds one chip. `removable` controls whether a ✕ button is included (staged tray) or not (static, in a sent message). */
@@ -599,9 +950,14 @@
     const input = messageInput();
     if (!input) return;
 
+    // Sending always acts on whichever tab is currently focused — the Send
+    // button/Enter key only ever apply to what's on screen.
+    const tab = activeTab();
+    if (!tab) return;
+
     const text = input.value.trim();
-    const readyAttachments = state.attachments.filter(a => a.status === 'ready');
-    if ((!text && readyAttachments.length === 0) || state.isGenerating) return;
+    const readyAttachments = tab.attachments.filter(a => a.status === 'ready');
+    if ((!text && readyAttachments.length === 0) || tab.isGenerating) return;
     if (!state.currentModel) {
       appendError('Please select a model first.');
       return;
@@ -612,7 +968,7 @@
     // readyAttachments above before the tray is cleared.
     input.value = '';
     input.style.height = 'auto';
-    state.attachments = [];
+    tab.attachments = [];
     renderAttachments();
 
     // Remove welcome if present
@@ -635,24 +991,27 @@
     // Add to history (clean text — matches what's displayed/restored later; the
     // attachment content itself only affects this one turn's request, same
     // one-turn-only scope as core.js's auto-injected project context).
-    state.conversationHistory.push({ role: 'user', content: displayText });
+    tab.conversationHistory.push({ role: 'user', content: displayText });
 
-    // Auto-create chat if none active
-    if (!state.activeChatId) {
-      await createNewChat(displayText.substring(0, 40).trim() || 'New Chat');
+    // Auto-create chat if this tab doesn't have one yet
+    if (!tab.chatId) {
+      await createNewChat(displayText.substring(0, 40).trim() || 'New Chat', tab);
     }
     // Auto-title if this is the first user message
-    if (state.conversationHistory.filter(m => m.role === 'user').length === 1 && state.activeChatId) {
+    if (tab.conversationHistory.filter(m => m.role === 'user').length === 1 && tab.chatId) {
       const autoTitle = displayText.substring(0, 40).trim() + (displayText.length > 40 ? '…' : '');
-      await window.kode.updateChatTitle(state.activeChatId, autoTitle);
+      await window.kode.updateChatTitle(tab.chatId, autoTitle);
       await loadChatList();
+      renderTabBar();
     }
 
     // Prepare assistant streaming state
-    state.isGenerating = true;
-    state.currentAssistantMessage = '';
-    state.toolResults = [];
-    setGeneratingUI(true);
+    tab.isGenerating = true;
+    tab.currentAssistantMessage = '';
+    tab.toolResults = [];
+    tab.model = state.currentModel;
+    setGeneratingUI(tab, true);
+    renderTabBar();
 
     // Show typing indicator
     const typingEl = createTypingIndicator();
@@ -668,17 +1027,24 @@
       messageToSend = text ? `${text}\n\n${attachmentText}` : attachmentText;
     }
 
-    // Send to backend
+    // Send to backend — tagged with this tab's id so its independent AgentCore
+    // instance handles it (see main.js's Per-Tab Agent Registry), and carrying
+    // this tab's own project folder explicitly rather than relying on whatever
+    // project happens to be globally "active" (which may differ if the user
+    // switches tabs while this send is in flight).
     try {
       await window.kode.sendMessage(
+        tab.id,
         state.currentModel,
         messageToSend,
-        state.conversationHistory.slice(0, -1), // history excludes the new message (already sent as 'message' param)
+        tab.conversationHistory.slice(0, -1), // history excludes the new message (already sent as 'message' param)
+        tab.projectPath,
       );
     } catch (err) {
       removeTypingIndicator();
-      setGeneratingUI(false);
-      state.isGenerating = false;
+      tab.isGenerating = false;
+      setGeneratingUI(tab, false);
+      renderTabBar();
       appendError(`Failed to send message: ${err.message || err}`);
     }
   }
@@ -686,55 +1052,83 @@
   /* ==========================================================
      Stream Listeners
      ========================================================== */
+  /**
+   * Registers the 5 streaming IPC listeners. Every payload is now tagged with a
+   * `tabId` (see main.js's Per-Tab Agent Registry) since any number of tabs can
+   * be streaming at once — each handler ALWAYS updates that tab's own state
+   * (so a backgrounded tab stays current and picks up right where it left off
+   * once focused), but only touches the shared DOM/header when the event's tab
+   * happens to be the one currently on screen.
+   */
   function setupStreamListeners() {
-    window.kode.onStreamToken((token) => {
-      removeTypingIndicator();
+    window.kode.onStreamToken(({ tabId, token }) => {
+      const tab = findTabById(tabId);
+      if (!tab) return;
+      const focused = tab === activeTab();
 
-      state.currentAssistantMessage += token;
-      state._tokenCount++;
-      updateTokenCounter();
+      if (focused) removeTypingIndicator();
 
-      // Create or update the assistant message element
-      if (!state.currentAssistantEl) {
-        state.currentAssistantEl = createStreamingAssistantElement();
-        messagesContainer().appendChild(state.currentAssistantEl);
+      tab.currentAssistantMessage += token;
+      tab._tokenCount++;
+
+      // Create or update the assistant message element. Kept as a real (if
+      // detached) DOM node even in the background, so switching to this tab
+      // later can just re-attach it instead of reconstructing anything.
+      if (!tab.currentAssistantEl) {
+        tab.currentAssistantEl = createStreamingAssistantElement();
+        if (focused) messagesContainer().appendChild(tab.currentAssistantEl);
       }
 
-      updateStreamingContent();
-      if (!state.userHasScrolled) scrollToBottom();
+      // Keep the (possibly detached) element's content current regardless of
+      // focus — otherwise switching to a tab mid-stream would show stale text
+      // until the next event happened to arrive for it.
+      updateStreamingContent(tab);
+
+      if (focused) {
+        updateTokenCounter(tab);
+        if (!tab.userHasScrolled) scrollToBottom();
+      }
     });
 
-    window.kode.onToolExecution((toolExec) => {
-      removeTypingIndicator();
+    window.kode.onToolExecution(({ tabId, tool, params, result }) => {
+      const tab = findTabById(tabId);
+      if (!tab) return;
+      const focused = tab === activeTab();
+      const toolExec = { tool, params, result };
 
-      state.toolResults.push(toolExec);
-      handleToolExecutionForRightPanel(toolExec);
+      if (focused) removeTypingIndicator();
+
+      tab.toolResults.push(toolExec);
+      handleToolExecutionForRightPanel(toolExec, tab);
 
       // Ensure assistant element exists
-      if (!state.currentAssistantEl) {
-        state.currentAssistantEl = createStreamingAssistantElement();
-        messagesContainer().appendChild(state.currentAssistantEl);
+      if (!tab.currentAssistantEl) {
+        tab.currentAssistantEl = createStreamingAssistantElement();
+        if (focused) messagesContainer().appendChild(tab.currentAssistantEl);
       }
 
       // Append tool card
-      const bubble = state.currentAssistantEl.querySelector('.message-bubble');
+      const bubble = tab.currentAssistantEl.querySelector('.message-bubble');
       if (bubble) {
         bubble.appendChild(createToolCard(toolExec));
       }
 
-      if (!state.userHasScrolled) scrollToBottom();
+      if (focused && !tab.userHasScrolled) scrollToBottom();
     });
 
-    window.kode.onStreamEnd((data) => {
-      clearAgentStatus();
-      removeTypingIndicator();
+    window.kode.onStreamEnd(({ tabId, response, toolResults }) => {
+      const tab = findTabById(tabId);
+      if (!tab) return;
+      const focused = tab === activeTab();
+
+      if (focused) { clearAgentStatus(); removeTypingIndicator(); }
 
       // Final content from response (may differ from accumulated tokens)
-      const finalContent = data?.response || state.currentAssistantMessage;
+      const finalContent = response || tab.currentAssistantMessage;
 
       // Final render with full markdown + highlighting
-      if (state.currentAssistantEl) {
-        const bubble = state.currentAssistantEl.querySelector('.message-bubble');
+      if (tab.currentAssistantEl) {
+        const bubble = tab.currentAssistantEl.querySelector('.message-bubble');
         if (bubble) {
           // Preserve tool cards
           const toolCards = bubble.querySelectorAll('.tool-card');
@@ -748,10 +1142,10 @@
           toolCards.forEach((tc) => bubble.appendChild(tc));
 
           // Append any new tool results from the end payload
-          if (data?.toolResults?.length) {
-            data.toolResults.forEach((tr) => {
+          if (toolResults && toolResults.length) {
+            toolResults.forEach((tr) => {
               // Avoid duplicates
-              if (!state.toolResults.find(e => e.tool === tr.tool && JSON.stringify(e.params) === JSON.stringify(tr.params))) {
+              if (!tab.toolResults.find(e => e.tool === tr.tool && JSON.stringify(e.params) === JSON.stringify(tr.params))) {
                 bubble.appendChild(createToolCard(tr));
               }
             });
@@ -760,49 +1154,63 @@
       }
 
       // Add to conversation history
-      state.conversationHistory.push({ role: 'assistant', content: finalContent });
+      tab.conversationHistory.push({ role: 'assistant', content: finalContent });
 
       // Auto-save chat
-      if (state.activeChatId) {
+      if (tab.chatId) {
         window.kode.saveChat({
-          chatId: state.activeChatId,
-          messages: state.conversationHistory,
-          model: state.currentModel,
+          chatId: tab.chatId,
+          messages: tab.conversationHistory,
+          model: tab.model || state.currentModel,
         });
       }
 
       // Reset streaming state
-      state.currentAssistantEl = null;
-      state.currentAssistantMessage = '';
-      state.toolResults = [];
-      state.isGenerating = false;
-      setGeneratingUI(false);
+      tab.currentAssistantEl = null;
+      tab.currentAssistantMessage = '';
+      tab.toolResults = [];
+      tab.isGenerating = false;
+      setGeneratingUI(tab, false);
+      renderTabBar();
 
-      if (!state.userHasScrolled) scrollToBottom();
+      if (focused && !tab.userHasScrolled) scrollToBottom();
     });
 
-    window.kode.onStreamError((error) => {
-      clearAgentStatus();
-      removeTypingIndicator();
+    window.kode.onStreamError(({ tabId, error }) => {
+      const tab = findTabById(tabId);
+      if (!tab) return;
+      const focused = tab === activeTab();
 
-      // Remove the in-progress assistant element if empty
-      if (state.currentAssistantEl && !state.currentAssistantMessage) {
-        state.currentAssistantEl.remove();
+      if (focused) { clearAgentStatus(); removeTypingIndicator(); }
+
+      // Remove the in-progress assistant element if empty (harmless no-op if it
+      // was never attached to the DOM because this tab was backgrounded)
+      if (tab.currentAssistantEl && !tab.currentAssistantMessage) {
+        tab.currentAssistantEl.remove();
       }
 
-      state.currentAssistantEl = null;
-      state.currentAssistantMessage = '';
-      state.toolResults = [];
-      state.isGenerating = false;
-      setGeneratingUI(false);
+      tab.currentAssistantEl = null;
+      tab.currentAssistantMessage = '';
+      tab.toolResults = [];
+      tab.isGenerating = false;
+      setGeneratingUI(tab, false);
+      renderTabBar();
 
       const msg = typeof error === 'string' ? error : (error?.error || error?.message || 'An unexpected error occurred');
-      appendError(msg);
+      if (focused) {
+        appendError(msg);
+      } else {
+        // Don't steal focus for a background tab's failure — surface it the
+        // moment the user switches to that tab instead (see switchTab()).
+        tab.lastError = msg;
+      }
     });
 
     // Agent status updates
-    window.kode.onAgentStatus((data) => {
-      updateAgentStatus(data.status, data.message);
+    window.kode.onAgentStatus(({ tabId, status, message }) => {
+      const tab = findTabById(tabId);
+      if (!tab) return;
+      updateAgentStatus(tab, status, message);
     });
   }
 
@@ -820,16 +1228,16 @@
     return msg;
   }
 
-  function updateStreamingContent() {
-    if (!state.currentAssistantEl) return;
-    const bubble = state.currentAssistantEl.querySelector('.message-bubble');
+  function updateStreamingContent(tab) {
+    if (!tab.currentAssistantEl) return;
+    const bubble = tab.currentAssistantEl.querySelector('.message-bubble');
     if (!bubble) return;
 
     // Preserve existing tool cards
     const toolCards = bubble.querySelectorAll('.tool-card');
 
     // Re-render markdown from accumulated text
-    const md = renderMarkdown(state.currentAssistantMessage);
+    const md = renderMarkdown(tab.currentAssistantMessage);
     bubble.innerHTML = '';
     bubble.appendChild(md);
 
@@ -840,7 +1248,9 @@
   /* ==========================================================
      UI Helpers
      ========================================================== */
-  function setGeneratingUI(generating) {
+  /** Only touches the send/stop/input DOM when `tab` is the one currently on screen — a background tab's generating state never affects the visible UI. */
+  function setGeneratingUI(tab, generating) {
+    if (tab !== activeTab()) return;
     const send = sendBtn();
     const stop = stopBtn();
     const input = messageInput();
@@ -872,28 +1282,46 @@
     });
   }
 
+  /** Stops generation for the FOCUSED tab only — other tabs keep working uninterrupted. */
   function stopGeneration() {
+    const tab = activeTab();
+    if (!tab) return;
     if (window.kode.stopGeneration) {
-      window.kode.stopGeneration();
+      window.kode.stopGeneration(tab.id);
     }
-    state.isGenerating = false;
-    setGeneratingUI(false);
+    tab.isGenerating = false;
+    setGeneratingUI(tab, false);
     removeTypingIndicator();
+    renderTabBar();
   }
 
+  /**
+   * "New Chat" button: resets the current tab back to a blank conversation if
+   * it's idle (matching the old single-conversation behavior people are used
+   * to), or — if the current tab is busy generating — opens a fresh tab instead
+   * of discarding that work. Use the tab bar's "+" button to always get a
+   * genuinely new tab regardless of what the current one is doing.
+   */
   async function newChat() {
-    state.conversationHistory = [];
-    state.currentAssistantMessage = '';
-    state.currentAssistantEl = null;
-    state.toolResults = [];
-    state.isGenerating = false;
-    state.userHasScrolled = false;
-    state.activeChatId = null;
-    state.attachments = [];
+    const current = activeTab();
+    if (!current || current.isGenerating) {
+      await newTab({ projectIndex: current ? current.projectIndex : -1 });
+      return;
+    }
+
+    current.chatId = null;
+    current.conversationHistory = [];
+    current.currentAssistantMessage = '';
+    current.currentAssistantEl = null;
+    current.toolResults = [];
+    current.userHasScrolled = false;
+    current.attachments = [];
     renderAttachments();
-    setGeneratingUI(false);
+    setGeneratingUI(current, false);
     showWelcome();
     resetPlanProgress();
+    state.activeChatId = null;
+    renderTabBar();
     // Deselect active chat in list
     document.querySelectorAll('.chat-item').forEach(el => el.classList.remove('active'));
   }
@@ -913,10 +1341,10 @@
       const result = await window.kode.addProject();
       if (result.success) {
         state.projects = result.projects;
-        state.activeProjectIndex = result.activeIndex;
         renderProjectsList();
-        refreshRightPanelFiles();
-        // Auto-expand the newly added project
+        // Open the newly added project in a tab (reusing the current tab if
+        // it's blank) and auto-expand its entry in the sidebar.
+        await openProjectTab(result.activeIndex);
         const items = document.querySelectorAll('.project-item');
         const lastItem = items[result.activeIndex];
         if (lastItem && !lastItem.classList.contains('expanded')) {
@@ -935,28 +1363,23 @@
       if (result.success) {
         state.projects = result.projects;
         state.activeProjectIndex = result.activeIndex;
+        // Fix up any tabs bound to the removed project (or to one after it,
+        // whose index just shifted down by one).
+        state.tabs.forEach((t) => {
+          if (t.projectIndex === index) {
+            t.projectIndex = -1;
+            t.projectPath = null;
+            t.projectName = null;
+          } else if (t.projectIndex > index) {
+            t.projectIndex--;
+          }
+        });
         renderProjectsList();
         refreshRightPanelFiles();
+        renderTabBar();
       }
     } catch (err) {
       console.error('Failed to remove project:', err);
-    }
-  }
-
-  async function setActiveProject(index) {
-    try {
-      const result = await window.kode.setActiveProject(index);
-      if (result.success) {
-        state.activeProjectIndex = result.activeIndex;
-        // Update active class on all project items
-        document.querySelectorAll('.project-item').forEach((el, i) => {
-          el.classList.toggle('active', i === state.activeProjectIndex);
-        });
-        await loadChatList();
-        refreshRightPanelFiles();
-      }
-    } catch (err) {
-      console.error('Failed to set active project:', err);
     }
   }
 
@@ -1028,10 +1451,10 @@
 
       item.append(header, treeContainer);
 
-      // Click header = set active + toggle expand
+      // Click header = open/focus this project's tab + toggle expand
       header.addEventListener('click', (e) => {
         if (e.target === closeBtn) return;
-        setActiveProject(index);
+        openProjectTab(index);
         item.classList.toggle('expanded');
         icon.textContent = item.classList.contains('expanded') ? '📂' : '📁';
         if (item.classList.contains('expanded') && treeContainer.children.length === 0) {
@@ -1180,40 +1603,50 @@
     if (section) section.hidden = true;
   }
 
-  /** Routes a tool-execution event to whichever right-panel section cares about it. */
-  function handleToolExecutionForRightPanel(toolExec) {
+  /** Routes a tool-execution event to whichever right-panel section cares about it. Always updates `tab`'s own cached state; only touches the DOM when `tab` is focused (the right panel only ever shows the focused tab). */
+  function handleToolExecutionForRightPanel(toolExec, tab) {
     if (toolExec.tool === 'write_plan') {
-      updatePlanProgressFromResult(toolExec.result);
+      tab.planProgressResult = toolExec.result;
+      if (tab === activeTab()) updatePlanProgressFromResult(toolExec.result);
     } else if (FILE_MUTATING_TOOLS.has(toolExec.tool)) {
-      refreshRightPanelFilesDebounced();
+      if (tab === activeTab()) refreshRightPanelFilesDebounced();
     }
   }
 
   /* ==========================================================
      Agent Activity Status
      ========================================================== */
-  function updateAgentStatus(status, message) {
+  /**
+   * Always updates `tab`'s own timer/token bookkeeping (so a backgrounded tab's
+   * elapsed time keeps counting correctly); only touches the header's status
+   * bar/timer DOM when `tab` is the one currently focused — otherwise a
+   * background tab's status would flicker over whatever the focused tab is
+   * showing.
+   */
+  function updateAgentStatus(tab, status, message) {
+    if (status === 'idle') {
+      tab._statusStartTime = null;
+      tab._tokenCount = 0;
+      if (tab === activeTab()) clearAgentStatus();
+      return;
+    }
+
+    if (!tab._statusStartTime) {
+      tab._statusStartTime = Date.now();
+      tab._tokenCount = 0;
+    }
+
+    if (tab !== activeTab()) return;
+
     const bar = document.getElementById('agent-status-bar');
     const indicator = document.getElementById('status-indicator');
     const text = document.getElementById('status-text');
-
     if (!bar || !indicator || !text) return;
-
-    if (status === 'idle') {
-      clearAgentStatus();
-      return;
-    }
 
     bar.classList.add('active');
     indicator.className = 'status-indicator ' + status;
     text.textContent = message;
-
-    // Start elapsed timer if not started
-    if (!state._statusStartTime) {
-      state._statusStartTime = Date.now();
-      state._tokenCount = 0;
-      startElapsedTimer();
-    }
+    startElapsedTimer();
   }
 
   function clearAgentStatus() {
@@ -1224,17 +1657,17 @@
       clearInterval(state._statusTimer);
       state._statusTimer = null;
     }
-    state._statusStartTime = null;
-    state._tokenCount = 0;
   }
 
+  /** ONE shared interval that redraws the header from whichever tab is currently focused — there's only ever one visible timer, so no need for one interval per tab. */
   function startElapsedTimer() {
     if (state._statusTimer) clearInterval(state._statusTimer);
     const timerEl = document.getElementById('elapsed-timer');
 
     state._statusTimer = setInterval(() => {
-      if (!state._statusStartTime || !timerEl) return;
-      const elapsed = Math.floor((Date.now() - state._statusStartTime) / 1000);
+      const tab = activeTab();
+      if (!tab || !tab._statusStartTime || !timerEl) return;
+      const elapsed = Math.floor((Date.now() - tab._statusStartTime) / 1000);
       const mins = Math.floor(elapsed / 60);
       const secs = elapsed % 60;
       timerEl.textContent = mins > 0
@@ -1243,10 +1676,10 @@
     }, 1000);
   }
 
-  function updateTokenCounter() {
+  function updateTokenCounter(tab) {
     const el = document.getElementById('token-counter');
-    if (el && state._tokenCount > 0) {
-      el.textContent = `${state._tokenCount} tokens`;
+    if (el && tab && tab._tokenCount > 0) {
+      el.textContent = `${tab._tokenCount} tokens`;
     }
   }
 
@@ -1373,106 +1806,71 @@
     return item;
   }
 
-  async function createNewChat(title) {
+  /** Creates a new saved chat and binds it to `tab` (called from sendMessage() the first time a tab's conversation gets its first message). */
+  async function createNewChat(title, tab) {
     try {
-      const activeProject = state.projects[state.activeProjectIndex];
-      const projectPath = activeProject ? activeProject.path : null;
+      const project = tab.projectIndex >= 0 ? state.projects[tab.projectIndex] : null;
+      const projectPath = project ? project.path : null;
       const result = await window.kode.createChat({
         title: title || 'New Chat',
         model: state.currentModel || '',
         projectPath,
       });
       if (result.success) {
-        state.activeChatId = result.chat.id;
+        tab.chatId = result.chat.id;
+        if (tab === activeTab()) state.activeChatId = tab.chatId;
         await loadChatList();
+        renderTabBar();
       }
     } catch (err) {
       console.error('Failed to create chat:', err);
     }
   }
 
+  /**
+   * Sidebar chat click: focuses a tab already showing this chat, reuses the
+   * focused tab in place if it's currently blank/idle (so casually clicking
+   * around chats doesn't pile up tabs), or otherwise opens a fresh tab for it.
+   */
   async function switchChat(chatId) {
-    if (chatId === state.activeChatId) return;
-
-    // Save current chat before switching
-    if (state.activeChatId && state.conversationHistory.length > 0) {
-      await window.kode.saveChat({
-        chatId: state.activeChatId,
-        messages: state.conversationHistory,
-        model: state.currentModel,
-      });
+    const existingIndex = state.tabs.findIndex((t) => t.chatId === chatId);
+    if (existingIndex >= 0) {
+      await switchTab(existingIndex);
+      return;
     }
 
-    try {
-      const result = await window.kode.setActiveChat(chatId);
-      if (result.success && result.chat) {
-        state.activeChatId = result.chat.id;
-        state.conversationHistory = result.chat.messages || [];
-        state.currentAssistantMessage = '';
-        state.currentAssistantEl = null;
-        state.toolResults = [];
-        state.isGenerating = false;
-        state.attachments = [];
-        renderAttachments();
-        setGeneratingUI(false);
-        resetPlanProgress(); // tool history (including any write_plan) isn't restored below, so neither is this
-
-        // Restore chat messages in UI
-        const container = messagesContainer();
-        if (!container) return;
-        container.innerHTML = '';
-
-        if (state.conversationHistory.length === 0) {
-          showWelcome();
-        } else {
-          state.conversationHistory.forEach(msg => {
-            const el = createMessageElement(msg.role, msg.role === 'assistant' ? '' : msg.content);
-            if (msg.role === 'assistant') {
-              const bubble = el.querySelector('.message-bubble');
-              if (bubble) {
-                const md = renderMarkdown(msg.content);
-                bubble.innerHTML = '';
-                bubble.appendChild(md);
-              }
-            }
-            container.appendChild(el);
-          });
-          scrollToBottom();
-        }
-
-        // Update active in list
-        document.querySelectorAll('.chat-item').forEach(el => {
-          el.classList.toggle('active', el.dataset.chatId === chatId);
-        });
-
-        // Set model if chat had one
-        if (result.chat.model) {
-          const select = modelSelect();
-          if (select && select.querySelector(`option[value="${result.chat.model}"]`)) {
-            select.value = result.chat.model;
-            state.currentModel = result.chat.model;
-            updateChatTitle();
-          }
-        }
-      }
-    } catch (err) {
-      console.error('Failed to switch chat:', err);
+    const current = activeTab();
+    if (current && !current.isGenerating && !current.chatId && current.conversationHistory.length === 0) {
+      await loadChatIntoTab(current, chatId);
+      renderTabBar();
+      return;
     }
+
+    const tab = await newTab();
+    await loadChatIntoTab(tab, chatId);
   }
 
   async function deleteChat(chatId) {
     try {
       const result = await window.kode.deleteChat(chatId);
       if (result.success) {
-        if (state.activeChatId === chatId) {
-          state.activeChatId = result.activeChatId || null;
-          if (state.activeChatId) {
-            await switchChat(state.activeChatId);
-          } else {
-            state.conversationHistory = [];
-            showWelcome();
+        // Any tab(s) currently showing this chat go back to a blank conversation.
+        state.tabs.forEach((t) => {
+          if (t.chatId === chatId) {
+            t.chatId = null;
+            t.conversationHistory = [];
+            t.currentAssistantMessage = '';
+            t.currentAssistantEl = null;
+            t.toolResults = [];
           }
+        });
+        const current = activeTab();
+        if (current && current.chatId === null && !current.isGenerating) {
+          state.activeChatId = null;
+          showWelcome();
+          resetPlanProgress();
         }
+        renderTabBar();
         await loadChatList();
       }
     } catch (err) {
