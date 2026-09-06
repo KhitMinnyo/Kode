@@ -47,3 +47,11 @@ coverage/
 # same reasoning as not committing node_modules. Keep the folder's own README/script.
 src/renderer/vendor/*.js
 src/renderer/vendor/*.css
+
+# Scratch/junk relocated here for the user to delete manually via Finder (this
+# sandbox's git operations can't actually delete files) — never meant to be
+# committed; a prior manual commit accidentally picked these up once already.
+_to_delete/
+# Auto-saved copy the Claude desktop app writes locally when a file is
+# delivered in chat — not project content.
+Claude outputs/
