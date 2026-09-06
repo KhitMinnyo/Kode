@@ -63,11 +63,14 @@ jobs:
       # (e.g. the one build-linux.yml's release job already created for the
       # same tag push) rather than failing or replacing it, so the Linux
       # .deb and the macOS .dmg end up as two files on one release.
+      # No `body`/`generate_release_notes` here on purpose: this project's
+      # releases are hand-written (see the *-release-notes.md files) and
+      # published manually first, so this step must only ATTACH the dmg to
+      # whatever release already exists for the tag, never touch its notes.
       - name: Create/Update Release
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*.dmg
-          generate_release_notes: true
           draft: false
           prerelease: false
         env:
