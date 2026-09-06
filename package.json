@@ -18,7 +18,10 @@
     "test": "node --test \"test/**/*.test.js\"",
     "lint": "eslint . --ext .js"
   },
-  "author": "Kode",
+  "author": {
+    "name": "Khit Minnyo",
+    "email": "hwa.aio.mm@gmail.com"
+  },
   "license": "MIT",
   "devDependencies": {
     "electron": "^42.5.0",
