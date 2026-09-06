@@ -13,6 +13,8 @@
     "build:zip": "electron-builder --mac zip",
     "build:linux": "electron-builder --linux",
     "build:deb": "electron-builder --linux deb",
+    "build:win": "electron-builder --win",
+    "build:exe": "electron-builder --win nsis",
     "test": "node --test \"test/**/*.test.js\"",
     "lint": "eslint . --ext .js"
   },
@@ -94,6 +96,24 @@
         "libsecret-1-0"
       ],
       "priority": "optional"
+    },
+    "win": {
+      "icon": "icon.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
     },
     "files": [
       "main.js",
