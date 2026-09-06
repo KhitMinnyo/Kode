@@ -4,13 +4,7 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch:
-    inputs:
-      release:
-        description: 'Create GitHub Release'
-        required: false
-        default: 'true'
-        type: boolean
+  workflow_dispatch: {}
 
 jobs:
   build:
@@ -47,7 +41,10 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.release == 'true')
+    # Only run on an actual tag push - GitHub Releases requires a tag to
+    # attach to, so a workflow_dispatch run on a branch (used to test that
+    # the build step itself works) intentionally skips this job.
+    if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
     
