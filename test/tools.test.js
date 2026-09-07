@@ -192,6 +192,37 @@ test('run_command rejects a missing command parameter', async () => {
   assert.match(result, /command.*required/i);
 });
 
+// ─── Auto-saving truncated output to .kode/scans/ ────────────────────────────
+
+test('run_command saves the full output to .kode/scans/ when it gets truncated, and says so', async () => {
+  const dir = makeTempDir();
+  // Print more than the 5KB truncation cap.
+  const result = await tools.run_command({ command: `node -e "for (let i = 0; i < 2000; i++) console.log('line ' + i)"` }, dir);
+
+  assert.match(result, /output truncated/);
+  assert.match(result, /📁 Full output .* saved to \.kode\/scans\//);
+
+  const scansDir = path.join(dir, '.kode', 'scans');
+  const files = fs.readdirSync(scansDir);
+  assert.equal(files.length, 1);
+  const saved = fs.readFileSync(path.join(scansDir, files[0]), 'utf-8');
+  assert.match(saved, /line 0/);
+  assert.match(saved, /line 1999/); // the part that got cut from the returned result
+});
+
+test('run_command does not save anything when output is short enough to fit untruncated', async () => {
+  const dir = makeTempDir();
+  const result = await tools.run_command({ command: 'echo short output' }, dir);
+  assert.doesNotMatch(result, /Full output/);
+  assert.ok(!fs.existsSync(path.join(dir, '.kode', 'scans')));
+});
+
+test('run_command does not crash saving output when no project folder is active', async () => {
+  const result = await tools.run_command({ command: `node -e "for (let i = 0; i < 2000; i++) console.log('line ' + i)"` });
+  assert.match(result, /output truncated/);
+  assert.doesNotMatch(result, /Full output/); // nowhere to save it — silently skipped
+});
+
 test('run_command registers detected server commands with processManager and keeps capturing their output', async (t) => {
   // Regression test for the gap where a detached server's stdout/stderr were torn
   // down and lost after the 3s startup check — this asserts the process shows up
@@ -306,6 +337,21 @@ test('git_status and git_diff reflect changes after a checkpoint', async () => {
 
   const diff = await tools.git_diff({}, dir);
   assert.match(diff, /hello world/);
+});
+
+test('git_diff saves the full diff to .kode/scans/ when it gets truncated', async () => {
+  const dir = makeTempDir();
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'a\n');
+  await tools.git_checkpoint({ message: 'init' }, dir);
+
+  // Enough changed lines to comfortably exceed git_diff's 6KB truncation cap.
+  const big = Array.from({ length: 2000 }, (_, i) => `line ${i}`).join('\n');
+  fs.writeFileSync(path.join(dir, 'a.txt'), big);
+
+  const diff = await tools.git_diff({}, dir);
+  assert.match(diff, /diff truncated/);
+  assert.match(diff, /📁 Full output .* saved to \.kode\/scans\//);
+  assert.ok(fs.readdirSync(path.join(dir, '.kode', 'scans')).length === 1);
 });
 
 test('git_revert with no params discards uncommitted changes back to the last checkpoint', async () => {
@@ -434,6 +480,15 @@ test('run_tests reports failure with output for a failing command', async () => 
   const result = await tools.run_tests({ command: 'echo boom 1>&2; exit 1' }, dir);
   assert.match(result, /❌ Tests failed/);
   assert.match(result, /boom/);
+});
+
+test('run_tests saves the full output to .kode/scans/ when it gets truncated', async () => {
+  const dir = makeTempDir();
+  const command = `node -e "for (let i = 0; i < 3000; i++) console.log('line ' + i)"`;
+  const result = await tools.run_tests({ command }, dir);
+  assert.match(result, /output truncated/);
+  assert.match(result, /📁 Full output .* saved to \.kode\/scans\//);
+  assert.ok(fs.readdirSync(path.join(dir, '.kode', 'scans')).length === 1);
 });
 
 // ─── write_plan ──────────────────────────────────────────────────────────────

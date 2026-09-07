@@ -81,6 +81,33 @@ function syntaxCheckSuffix(absPath) {
 }
 
 /**
+ * When a tool result's output exceeds its truncation cap, saves the FULL text to
+ * <project>/.kode/scans/<timestamp>-<label>.txt instead of just discarding everything
+ * past the cutoff. Pentest scans especially (nmap -A, nikto, sqlmap --dump) routinely
+ * produce far more than a truncation cap's worth of directly relevant detail — losing
+ * everything past the first few KB with no way to recover it undermines the point of
+ * running the scan in the first place. Best-effort: silently returns '' if there's no
+ * project folder to save into or the write itself fails, so a save problem never turns
+ * into the original tool call failing.
+ * @returns {string} a note to append after the truncated text, or '' if nothing was saved.
+ */
+function saveFullOutput(projectFolder, label, fullText) {
+  if (!projectFolder) return '';
+  try {
+    const dir = path.join(projectFolder, '.kode', 'scans');
+    fs.mkdirSync(dir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const safeLabel = String(label || 'output').trim().split(/\s+/)[0].replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40) || 'output';
+    const fileName = `${stamp}-${safeLabel}.txt`;
+    fs.writeFileSync(path.join(dir, fileName), fullText, 'utf-8');
+    return `\n📁 Full output (${fullText.length} bytes) saved to .kode/scans/${fileName} — use read_file with offset/limit to see the rest.`;
+  } catch (err) {
+    console.warn('[Tools] Failed to save full output to .kode/scans:', err.message);
+    return '';
+  }
+}
+
+/**
  * Tool: create_file
  * Creates a new file with the given content. Automatically creates parent directories.
  */
@@ -118,7 +145,7 @@ async function create_file(params, projectFolder) {
  * Requires a FIRECRAWL_API_KEY environment variable — without it, Firecrawl's API will
  * reject the request, so we fail fast with a clear message instead of a silent 401.
  */
-async function firecrawl_scrape(params) {
+async function firecrawl_scrape(params, projectFolder) {
   const url = (params && (params.url || params)) || '';
 
   if (!url || typeof url !== 'string') {
@@ -151,8 +178,13 @@ async function firecrawl_scrape(params) {
     if (result.success && result.data && result.data.markdown) {
       const content = result.data.markdown;
       const maxLen = 5000;
-      const truncated = content.length > maxLen ? content.substring(0, maxLen) + '\n\n... (truncated)' : content;
-      return `🌐 Scraped Content (Markdown) from ${url}:\n\n${truncated}`;
+      let truncated = content;
+      let savedNote = '';
+      if (content.length > maxLen) {
+        truncated = content.substring(0, maxLen) + '\n\n... (truncated)';
+        savedNote = saveFullOutput(projectFolder, 'scrape', content);
+      }
+      return `🌐 Scraped Content (Markdown) from ${url}:\n\n${truncated}${savedNote}`;
     }
     return `❌ Error: Failed to scrape ${url}. Firecrawl response: ${JSON.stringify(result)}`;
   } catch (error) {
@@ -657,10 +689,18 @@ async function run_command(params, projectFolder, toolContext = {}) {
     if (output.length === 0) {
       return `${riskWarning}✅ Command executed successfully (no output):\n$ ${command}`;
     }
-    // Truncate very long output (5KB for scan results)
+    // Truncate very long output (5KB for scan results) — but never just lose the rest
+    // of it: nmap/nikto/sqlmap/etc routinely produce far more than 5KB of directly
+    // relevant detail, so anything past the cutoff is saved in full to .kode/scans/
+    // (see saveFullOutput) rather than discarded.
     const maxLen = 5000;
-    const truncated = output.length > maxLen ? output.substring(0, maxLen) + '\n\n... (output truncated)' : output;
-    return `${riskWarning}✅ Command output:\n$ ${command}\n\n${truncated}`;
+    let truncated = output;
+    let savedNote = '';
+    if (output.length > maxLen) {
+      truncated = output.substring(0, maxLen) + '\n\n... (output truncated)';
+      savedNote = saveFullOutput(projectFolder, command, output);
+    }
+    return `${riskWarning}✅ Command output:\n$ ${command}\n\n${truncated}${savedNote}`;
   } catch (err) {
     return `❌ Failed to run command: ${err.message}\n$ ${command}`;
   }
@@ -893,8 +933,13 @@ async function git_diff(params = {}, projectFolder) {
     if (!output) return `📊 No ${staged ? 'staged ' : ''}changes${filePath ? ` in ${filePath}` : ''}.`;
 
     const maxLen = 6000;
-    const truncated = output.length > maxLen ? output.substring(0, maxLen) + '\n\n... (diff truncated)' : output;
-    return `📊 Git diff${filePath ? ` (${filePath})` : ''}:\n\n${truncated}`;
+    let truncated = output;
+    let savedNote = '';
+    if (output.length > maxLen) {
+      truncated = output.substring(0, maxLen) + '\n\n... (diff truncated)';
+      savedNote = saveFullOutput(projectFolder, 'git-diff', output);
+    }
+    return `📊 Git diff${filePath ? ` (${filePath})` : ''}:\n\n${truncated}${savedNote}`;
   } catch (err) {
     return `❌ git diff failed: ${(err.stderr || err.message || '').toString().trim()}`;
   }
@@ -1097,8 +1142,13 @@ async function run_tests(params = {}, projectFolder, toolContext = {}) {
 
     const output = rawStdout.trim();
     const maxLen = 6000;
-    const truncated = output.length > maxLen ? output.substring(0, maxLen) + '\n\n... (output truncated)' : output;
-    return `✅ Tests passed:\n$ ${command}\n\n${truncated || '(no output)'}`;
+    let truncated = output;
+    let savedNote = '';
+    if (output.length > maxLen) {
+      truncated = output.substring(0, maxLen) + '\n\n... (output truncated)';
+      savedNote = saveFullOutput(projectFolder, 'test-output', output);
+    }
+    return `✅ Tests passed:\n$ ${command}\n\n${truncated || '(no output)'}${savedNote}`;
   } catch (err) {
     return `❌ Failed to run tests: ${err.message}\n$ ${command}`;
   }
