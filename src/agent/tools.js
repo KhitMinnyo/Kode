@@ -862,6 +862,290 @@ async function search_files(params, projectFolder) {
 }
 
 /**
+ * Tool: security_audit
+ * A regex-based static pre-scan for common vulnerability classes (hardcoded
+ * secrets, eval/exec sinks, SQL string concatenation, weak crypto, JWT
+ * misconfiguration), so a request like "audit this app for security issues" is
+ * grounded in real, file/line-cited candidate findings instead of the model
+ * guessing or writing a generic checklist from memory. NOT a replacement for a real
+ * SAST tool (semgrep, CodeQL, etc.) or a human review — pattern matching alone
+ * can't understand data flow, so it will both miss real issues (anything that
+ * doesn't match a pattern) and flag safe code that happens to match one (e.g. a
+ * parameterized query whose SQL string is still built near a `+`). Findings are
+ * candidates to go read in context, not a verdict — the tool's own output says so.
+ */
+
+const AUDIT_SKIP_DIRS = new Set([
+  'node_modules', '.git', '.kode', 'dist', 'build', 'out', '__pycache__',
+  'venv', '.venv', 'vendor', 'target', '.next', '.cache', 'coverage',
+]);
+
+// Broader than embeddings.js's INDEXABLE_EXT — adds config/env formats where
+// hardcoded secrets commonly live. This tool is scanning for risk, not indexing
+// code for semantic search, so config and shell files matter here too.
+const AUDIT_EXTENSIONS = new Set([
+  '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs',
+  '.py', '.go', '.rs', '.java', '.kt', '.swift', '.rb', '.php', '.c', '.h', '.cpp', '.hpp', '.cs',
+  '.json', '.yaml', '.yml', '.toml', '.ini', '.sh', '.sql',
+]);
+
+const AUDIT_MAX_FILES = 1000;
+const AUDIT_MAX_FILE_SIZE = 300 * 1024; // skip huge generated/data files as noise
+
+/**
+ * Recursively lists auditable files under root. Unlike embeddings.js's walkFiles,
+ * this does NOT blanket-skip dotfiles: .env / .env.* are one of the most common
+ * places a hardcoded secret actually lives, and would otherwise never be scanned.
+ * Other dot-directories (.vscode, .idea, etc.) are still skipped as noise.
+ */
+function walkAuditFiles(root, dir = root, out = []) {
+  if (out.length >= AUDIT_MAX_FILES) return out;
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+
+  for (const entry of entries) {
+    if (out.length >= AUDIT_MAX_FILES) break;
+    const full = path.join(dir, entry.name);
+
+    if (entry.isDirectory()) {
+      if (AUDIT_SKIP_DIRS.has(entry.name)) continue;
+      if (entry.name.startsWith('.') && entry.name !== '.') continue;
+      walkAuditFiles(root, full, out);
+      continue;
+    }
+
+    const isEnvFile = entry.name === '.env' || entry.name.startsWith('.env.');
+    const ext = path.extname(entry.name).toLowerCase();
+    if (!isEnvFile && !AUDIT_EXTENSIONS.has(ext)) continue;
+
+    try {
+      const stat = fs.statSync(full);
+      if (stat.size > AUDIT_MAX_FILE_SIZE || stat.size === 0) continue;
+    } catch {
+      continue;
+    }
+
+    out.push(path.relative(root, full));
+  }
+
+  return out;
+}
+
+/**
+ * Rule set: each rule runs per-line (not multi-line) so a finding can cite an exact
+ * line number. `redact: true` marks rules whose match IS (or contains, via
+ * `secretGroup`) a real credential value — the actual secret text is masked in the
+ * report rather than echoed in full, since tool output flows back into the
+ * conversation and, on a cloud provider, off this machine entirely. `secretGroup`
+ * (a regex capture-group index) narrows redaction to just the value, leaving
+ * surrounding context (e.g. the `api_key:` prefix) readable; omitted, the whole
+ * match is redacted.
+ */
+const AUDIT_RULES = [
+  // --- Hardcoded secrets ---
+  { category: 'hardcoded-secret', severity: 'HIGH', redact: true, secretGroup: 1,
+    regex: /\b(?:api[_-]?key|secret[_-]?key|access[_-]?key|auth[_-]?token|client[_-]?secret|password|passwd|pwd)\s*[:=]\s*['"]([A-Za-z0-9+/_\-]{12,})['"]/i,
+    description: 'Possible hardcoded credential (key/token/password assigned to a literal string)' },
+  { category: 'hardcoded-secret', severity: 'HIGH', redact: true,
+    regex: /AKIA[0-9A-Z]{16}/,
+    description: 'AWS Access Key ID literal' },
+  { category: 'hardcoded-secret', severity: 'HIGH', redact: true,
+    regex: /-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----/,
+    description: 'Embedded private key header — the key file itself shouldn\'t be in the repo' },
+  { category: 'hardcoded-secret', severity: 'HIGH', redact: true,
+    regex: /xox[baprs]-[0-9A-Za-z-]{10,}/,
+    description: 'Slack token literal' },
+  { category: 'hardcoded-secret', severity: 'HIGH', redact: true,
+    regex: /gh[pousr]_[A-Za-z0-9]{36,}/,
+    description: 'GitHub personal access token literal' },
+  { category: 'hardcoded-secret', severity: 'HIGH', redact: true,
+    regex: /sk_live_[0-9a-zA-Z]{16,}/,
+    description: 'Stripe live secret key literal' },
+  { category: 'hardcoded-secret', severity: 'HIGH', redact: true,
+    regex: /AIza[0-9A-Za-z\-_]{35}/,
+    description: 'Google API key literal' },
+  { category: 'hardcoded-secret', severity: 'MEDIUM', redact: true,
+    regex: /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/,
+    description: 'Literal JWT embedded in source — worth double-checking even if it looks like test/example data' },
+
+  // --- eval/exec sinks (code / command injection) ---
+  { category: 'eval-exec-sink', severity: 'HIGH',
+    regex: /\beval\s*\(/,
+    description: 'eval() — arbitrary code execution if the argument includes untrusted input' },
+  { category: 'eval-exec-sink', severity: 'HIGH',
+    regex: /new\s+Function\s*\(/,
+    description: 'new Function(...) — dynamic code construction, same risk class as eval' },
+  { category: 'eval-exec-sink', severity: 'HIGH',
+    regex: /child_process\.exec\s*\(|require\(['"]child_process['"]\)\.exec\s*\(/,
+    description: 'child_process.exec() — shell command injection risk if input isn\'t sanitized; prefer execFile/spawn with an argument array' },
+  { category: 'eval-exec-sink', severity: 'HIGH',
+    regex: /os\.system\s*\(/,
+    description: 'os.system() — shell command injection risk; prefer subprocess.run([...]) without shell=True' },
+  { category: 'eval-exec-sink', severity: 'HIGH',
+    regex: /subprocess\.\w+\([^)]*shell\s*=\s*True/,
+    description: 'subprocess call with shell=True — shell command injection risk if any argument includes untrusted input' },
+  { category: 'eval-exec-sink', severity: 'HIGH',
+    regex: /\b(?:shell_exec|passthru)\s*\(/,
+    description: 'PHP shell-execution function — command injection risk if the argument includes untrusted input' },
+
+  // --- SQL string concatenation / interpolation (SQL injection) ---
+  { category: 'sql-injection', severity: 'MEDIUM',
+    regex: /(['"])\s*(?:SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM)\b[^'"]*\1\s*\+/i,
+    description: 'SQL built via string concatenation — prefer parameterized queries/placeholders' },
+  { category: 'sql-injection', severity: 'MEDIUM',
+    regex: /f['"][^'"]*(?:SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM)\b[^'"]*\{/i,
+    description: 'SQL built via an f-string — prefer parameterized queries/placeholders' },
+  { category: 'sql-injection', severity: 'MEDIUM',
+    regex: /`[^`]*\b(?:SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM)\b[^`]*\$\{/i,
+    description: 'SQL built via a template literal — prefer parameterized queries/placeholders' },
+
+  // --- Weak crypto ---
+  { category: 'weak-crypto', severity: 'MEDIUM',
+    regex: /createHash\s*\(\s*['"]md5['"]\s*\)|hashlib\.md5\s*\(|MessageDigest\.getInstance\s*\(\s*["']MD5["']\s*\)/i,
+    description: 'MD5 is cryptographically broken — fine for a non-security checksum, unsafe for passwords/signatures/integrity checks' },
+  { category: 'weak-crypto', severity: 'MEDIUM',
+    regex: /createHash\s*\(\s*['"]sha1['"]\s*\)|hashlib\.sha1\s*\(|MessageDigest\.getInstance\s*\(\s*["']SHA-?1["']\s*\)/i,
+    description: 'SHA-1 is deprecated for security use (collision-broken) — unsafe for passwords/signatures' },
+  { category: 'weak-crypto', severity: 'HIGH',
+    regex: /Cipher\.getInstance\s*\(\s*["']DES|\bDES\/ECB\b/,
+    description: 'DES has a 56-bit key and is trivially brute-forceable — use AES instead' },
+  { category: 'weak-crypto', severity: 'HIGH',
+    regex: /Cipher\.getInstance\s*\(\s*["']RC4/,
+    description: 'RC4 has known biases/attacks — use a modern authenticated cipher (e.g. AES-GCM) instead' },
+  { category: 'weak-crypto', severity: 'LOW',
+    regex: /Math\.random\s*\(\s*\).{0,40}(?:token|password|secret|session|nonce|api[_-]?key)|(?:token|password|secret|session|nonce|api[_-]?key).{0,40}Math\.random\s*\(\s*\)/i,
+    description: 'Math.random() is not cryptographically secure — use crypto.randomBytes()/randomUUID() for tokens, session IDs, or secrets' },
+
+  // --- JWT misconfiguration ---
+  { category: 'jwt-misconfig', severity: 'HIGH',
+    regex: /algorithms?\s*[:=]\s*\[?\s*['"]none['"]/i,
+    description: 'JWT "none" algorithm accepted — lets an attacker forge a token with no signature at all' },
+  { category: 'jwt-misconfig', severity: 'HIGH',
+    regex: /jwt\.decode\([^)]*verify\s*=\s*False/,
+    description: 'jwt.decode() with verify=False — the signature is never checked, so any forged token is accepted' },
+];
+
+// .env files commonly store secrets as bare, UNQUOTED assignments (API_KEY=abc123,
+// not API_KEY="abc123"), which none of AUDIT_RULES' quoted-string patterns match.
+// Applied only to .env / .env.* files (see the isEnvFile check in security_audit) —
+// scoping it that way, rather than matching any bare KEY=value anywhere, avoids
+// flagging every ordinary shell variable assignment (PORT=3000, DEBUG=true) in
+// non-.env files as a "secret". Still narrowed further by requiring the variable
+// name itself to look secret-shaped.
+const ENV_FILE_SECRET_RULE = {
+  category: 'hardcoded-secret', severity: 'HIGH', redact: true, secretGroup: 1,
+  regex: /^\s*[A-Za-z0-9_]*(?:SECRET|API[_-]?KEY|TOKEN|PASSWORD|PASSWD|PWD|AUTH|CREDENTIAL|PRIVATE[_-]?KEY)[A-Za-z0-9_]*\s*=\s*(\S+)/i,
+  description: '.env-style secret assignment — this file should not be committed to the repo (check .gitignore)',
+};
+
+/**
+ * Masks a matched secret so the raw credential value never leaves this scan (and,
+ * on a cloud provider, never leaves this machine) — keeps just enough of each end
+ * to recognize the finding without exposing anything usable.
+ */
+function redactSecret(text) {
+  if (!text) return '';
+  if (text.length <= 8) return '*'.repeat(text.length);
+  return `${text.slice(0, 4)}${'*'.repeat(Math.min(text.length - 8, 24))}${text.slice(-4)}`;
+}
+
+async function security_audit(params = {}, projectFolder) {
+  if (!projectFolder) return '❌ Error: security_audit requires an active project folder.';
+
+  const scopePath = params.path && String(params.path).trim();
+  const root = scopePath
+    ? (path.isAbsolute(scopePath) ? scopePath : path.resolve(projectFolder, scopePath))
+    : projectFolder;
+
+  if (!fs.existsSync(root)) return `❌ Error: "${root}" not found.`;
+
+  const rootIsDir = fs.statSync(root).isDirectory();
+  const relFiles = rootIsDir ? walkAuditFiles(root) : [path.basename(root)];
+
+  if (relFiles.length === 0) {
+    return `🛡️ security_audit: no auditable files found under "${scopePath || '.'}".`;
+  }
+
+  const findings = [];
+  for (const relPath of relFiles) {
+    const fullPath = rootIsDir ? path.join(root, relPath) : root;
+    let content;
+    try {
+      content = fs.readFileSync(fullPath, 'utf-8');
+    } catch {
+      continue; // binary or unreadable — skip rather than fail the whole scan
+    }
+
+    const base = path.basename(relPath);
+    const isEnvFile = base === '.env' || base.startsWith('.env.');
+    const rulesToApply = isEnvFile ? [...AUDIT_RULES, ENV_FILE_SECRET_RULE] : AUDIT_RULES;
+
+    const lines = content.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      for (const rule of rulesToApply) {
+        const match = line.match(rule.regex);
+        if (!match) continue;
+
+        let snippet = line.trim();
+        if (rule.redact) {
+          const target = rule.secretGroup ? match[rule.secretGroup] : match[0];
+          if (target) snippet = snippet.split(target).join(redactSecret(target));
+        }
+
+        findings.push({
+          file: relPath,
+          line: i + 1,
+          category: rule.category,
+          severity: rule.severity,
+          description: rule.description,
+          snippet: snippet.slice(0, 200),
+        });
+      }
+    }
+  }
+
+  if (findings.length === 0) {
+    return `🛡️ security_audit scanned ${relFiles.length} file(s) under "${scopePath || '.'}" — no pattern-matched issues found.\n` +
+      `(This is a regex pre-scan, not a full audit — it can't see logic/data-flow issues like broken access control or ` +
+      `missing authorization checks. Still worth a manual review of auth, input validation, and access control.)`;
+  }
+
+  const severityRank = { HIGH: 0, MEDIUM: 1, LOW: 2 };
+  findings.sort((a, b) =>
+    severityRank[a.severity] - severityRank[b.severity] ||
+    a.file.localeCompare(b.file) ||
+    a.line - b.line
+  );
+
+  const counts = findings.reduce((acc, f) => { acc[f.severity] = (acc[f.severity] || 0) + 1; return acc; }, {});
+  const countSummary = ['HIGH', 'MEDIUM', 'LOW'].filter((s) => counts[s]).map((s) => `${counts[s]} ${s}`).join(', ');
+  const summaryLine = `🛡️ security_audit found ${findings.length} candidate issue(s) in ${relFiles.length} file(s) scanned (${countSummary}):`;
+
+  const MAX_SHOWN = 60;
+  const shown = findings.slice(0, MAX_SHOWN);
+  const body = shown
+    .map((f, i) => `${i + 1}. [${f.severity}] ${f.category} — ${f.file}:${f.line}\n   ${f.description}\n   > ${f.snippet}`)
+    .join('\n\n');
+
+  let truncNote = '';
+  if (findings.length > MAX_SHOWN) {
+    const fullText = findings
+      .map((f) => `[${f.severity}] ${f.category} — ${f.file}:${f.line}\n${f.description}\n> ${f.snippet}`)
+      .join('\n\n');
+    truncNote = `\n\n… ${findings.length - MAX_SHOWN} more finding(s) not shown.${saveFullOutput(projectFolder, 'security-audit', fullText)}`;
+  }
+
+  return `${summaryLine}\n\n${body}${truncNote}\n\n` +
+    `⚠️ These are pattern-matched candidates, not confirmed vulnerabilities — read each one in its surrounding context before ` +
+    `treating it as real, and note this pre-scan can't see logic/data-flow issues like broken access control or missing authorization checks.`;
+}
+
+/**
  * Resolves the project's git top-level, or null if projectFolder isn't inside a git
  * working tree. Used by the read/revert git tools (git_status, git_diff, git_revert)
  * which should fail clearly rather than silently operating on the wrong directory —
@@ -1354,6 +1638,7 @@ const tools = {
   list_directory,
   http_request,
   search_files,
+  security_audit,
   firecrawl_scrape,
   web_search,
   save_memory,
@@ -1483,6 +1768,20 @@ const TOOL_SCHEMAS = [
           file_pattern: { type: 'string', description: 'Glob to filter which files are searched, e.g. "*.js".' },
         },
         required: ['pattern'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'security_audit',
+      description: 'Regex-based static pre-scan for common vulnerability classes: hardcoded secrets, eval/exec sinks (code/command injection), SQL string concatenation, weak crypto (MD5/SHA1/DES/RC4/insecure random), and JWT misconfiguration ("none" algorithm, unverified decode). Returns file:line-cited candidate findings with severity — a starting point to ground a security review in real matches, not a substitute for reading the code or a real SAST tool.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File or directory to scan, defaults to the whole project.' },
+        },
+        required: [],
       },
     },
   },
@@ -1707,6 +2006,7 @@ const READ_ONLY_TOOLS = new Set([
   'read_file',
   'list_directory',
   'search_files',
+  'security_audit',
   'git_status',
   'git_diff',
   'web_search',

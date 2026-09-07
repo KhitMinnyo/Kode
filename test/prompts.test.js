@@ -7,9 +7,16 @@ const { getSystemPrompt, getAvailableToolNames, supportsNativeToolCalling, looks
 
 test('getAvailableToolNames includes every implemented tool', () => {
   const names = getAvailableToolNames();
-  for (const expected of ['create_file', 'edit_file', 'read_file', 'run_command', 'list_directory', 'http_request', 'search_files', 'firecrawl_scrape', 'web_search', 'save_memory', 'recall_memory']) {
+  for (const expected of ['create_file', 'edit_file', 'read_file', 'run_command', 'list_directory', 'http_request', 'search_files', 'security_audit', 'firecrawl_scrape', 'web_search', 'save_memory', 'recall_memory']) {
     assert.ok(names.includes(expected), `expected ${expected} to be listed as available`);
   }
+});
+
+test('getAvailableToolNames matches every tool actually implemented in tools.js — otherwise core.js rejects real calls as "Unknown tool"', () => {
+  const tools = require('../src/agent/tools');
+  const implementedNames = Object.keys(tools).filter((k) => typeof tools[k] === 'function').sort();
+  const names = getAvailableToolNames().slice().sort();
+  assert.deepEqual(names, implementedNames);
 });
 
 test('supportsNativeToolCalling recognizes known tool-calling-capable families', () => {

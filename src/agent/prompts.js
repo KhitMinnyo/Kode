@@ -157,6 +157,7 @@ already asked for the whole task; don't hand it back to them half-finished.
 - **list_directory** — path
 - **http_request** — url, method, headers, body (HTTP requests, API testing)
 - **search_files** — pattern, path, file_pattern (grep-like search)
+- **security_audit** — path (regex pre-scan for hardcoded secrets, eval/exec sinks, SQL string-concat, weak crypto, JWT misconfig — file:line-cited candidates, not confirmed vulnerabilities)
 - **firecrawl_scrape** — url (clean Markdown extraction from docs/CVE pages/JS-heavy sites; requires FIRECRAWL_API_KEY)
 - **web_search** — query (search the live web via Brave Search; requires BRAVE_SEARCH_API_KEY)
 - **save_memory** — key, value, tags (persist a durable fact for THIS project — survives restarts and new chats)
@@ -565,8 +566,12 @@ function getPentestPrompt() {
 - Suggest next exploitation step with exact commands
 
 **Code security auditing:**
-- Check for: injection, XSS, CSRF, auth bypass, hardcoded secrets
-- Use search_files to find passwords, API keys, SQL queries
+- Call **security_audit** first — a regex pre-scan for hardcoded secrets, eval/exec
+  sinks, SQL string-concat, weak crypto, and JWT misconfiguration, with file:line
+  citations and severity. Treat its findings as candidates to verify in context, not
+  a finished report: read each one, confirm it's real, and check for what it can't
+  see (auth bypass, IDOR, logic/data-flow issues).
+- Follow up with search_files/read_file for anything the pre-scan can't pattern-match.
 - Report with severity levels`;
 }
 
@@ -576,7 +581,7 @@ function getPentestPrompt() {
 function getAvailableToolNames() {
   return [
     'create_file', 'edit_file', 'read_file', 'run_command', 'list_directory', 'http_request',
-    'search_files', 'firecrawl_scrape', 'web_search', 'save_memory', 'recall_memory',
+    'search_files', 'security_audit', 'firecrawl_scrape', 'web_search', 'save_memory', 'recall_memory',
     'git_status', 'git_diff', 'git_checkpoint', 'git_revert', 'apply_patch', 'run_tests',
     'write_plan', 'index_codebase', 'semantic_search',
   ];

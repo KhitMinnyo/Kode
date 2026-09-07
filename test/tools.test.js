@@ -119,6 +119,128 @@ test('search_files finds a pattern across files', async () => {
   assert.match(result, /a\.py/);
 });
 
+test('security_audit requires an active project folder', async () => {
+  const result = await tools.security_audit({}, null);
+  assert.match(result, /requires an active project folder/);
+});
+
+test('security_audit reports no findings for a clean project', async () => {
+  const dir = makeTempDir();
+  fs.writeFileSync(path.join(dir, 'app.js'), 'function add(a, b) {\n  return a + b;\n}\n');
+  const result = await tools.security_audit({}, dir);
+  assert.match(result, /no pattern-matched issues found/);
+});
+
+test('security_audit detects a hardcoded credential and redacts the actual secret value', async () => {
+  const dir = makeTempDir();
+  fs.writeFileSync(path.join(dir, 'config.js'), "const apiKey = \"sk_abcdefghijklmnopqrstuvwxyz123456\";\n");
+  const result = await tools.security_audit({}, dir);
+  assert.match(result, /hardcoded-secret/);
+  assert.match(result, /config\.js:1/);
+  assert.doesNotMatch(result, /sk_abcdefghijklmnopqrstuvwxyz123456/, 'the raw secret value must never appear in the report');
+  assert.match(result, /\*{4,}/, 'expected the redacted value to show masking asterisks');
+});
+
+test('security_audit detects an AWS access key literal', async () => {
+  const dir = makeTempDir();
+  fs.writeFileSync(path.join(dir, '.env'), 'AWS_KEY=AKIAABCDEFGHIJKLMNOP\n');
+  const result = await tools.security_audit({}, dir);
+  assert.match(result, /hardcoded-secret/);
+  assert.doesNotMatch(result, /AKIAABCDEFGHIJKLMNOP/);
+});
+
+test('security_audit scans .env files even though dotfiles are skipped generally', async () => {
+  const dir = makeTempDir();
+  fs.writeFileSync(path.join(dir, '.env'), 'API_KEY=abcdefghijklmnopqrstuvwx\n');
+  fs.mkdirSync(path.join(dir, '.hidden-dir'));
+  fs.writeFileSync(path.join(dir, '.hidden-dir', 'x.js'), 'const apiKey = "abcdefghijklmnopqrstuvwx";\n');
+  const result = await tools.security_audit({}, dir);
+  assert.match(result, /\.env:1/, 'expected .env to be scanned');
+  assert.doesNotMatch(result, /\.hidden-dir/, 'expected an unrelated dot-directory to still be skipped');
+});
+
+test('security_audit detects eval() as a code-injection sink', async () => {
+  const dir = makeTempDir();
+  fs.writeFileSync(path.join(dir, 'app.js'), 'function run(userInput) {\n  return eval(userInput);\n}\n');
+  const result = await tools.security_audit({}, dir);
+  assert.match(result, /eval-exec-sink/);
+  assert.match(result, /app\.js:2/);
+});
+
+test('security_audit detects SQL built via string concatenation', async () => {
+  const dir = makeTempDir();
+  fs.writeFileSync(path.join(dir, 'db.js'), 'const q = "SELECT * FROM users WHERE id = " + userId;\n');
+  const result = await tools.security_audit({}, dir);
+  assert.match(result, /sql-injection/);
+});
+
+test('security_audit detects weak crypto (MD5) and JWT "none" algorithm misconfiguration', async () => {
+  const dir = makeTempDir();
+  fs.writeFileSync(path.join(dir, 'auth.js'), [
+    "const hash = crypto.createHash('md5').update(password).digest('hex');",
+    "const opts = { algorithms: ['none'] };",
+    '',
+  ].join('\n'));
+  const result = await tools.security_audit({}, dir);
+  assert.match(result, /weak-crypto/);
+  assert.match(result, /jwt-misconfig/);
+});
+
+test('security_audit skips node_modules and other noise directories', async () => {
+  const dir = makeTempDir();
+  fs.mkdirSync(path.join(dir, 'node_modules'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'node_modules', 'dep.js'), 'const password = "abcdefghijklmnopqrstuvwx";\n');
+  // A real top-level file too, so the scan has something to actually report on —
+  // otherwise (node_modules being the only thing on disk) it'd correctly hit the
+  // separate "no auditable files found" early-return instead of exercising the
+  // "scanned N files, found nothing" path this test is actually about.
+  fs.writeFileSync(path.join(dir, 'app.js'), 'function add(a, b) { return a + b; }\n');
+  const result = await tools.security_audit({}, dir);
+  assert.match(result, /no pattern-matched issues found/);
+});
+
+test('security_audit can be scoped to a specific subdirectory or file via the path param', async () => {
+  const dir = makeTempDir();
+  fs.mkdirSync(path.join(dir, 'src'));
+  fs.mkdirSync(path.join(dir, 'other'));
+  fs.writeFileSync(path.join(dir, 'src', 'a.js'), 'const password = "abcdefghijklmnopqrstuvwx";\n');
+  fs.writeFileSync(path.join(dir, 'other', 'b.js'), 'const password = "zzzzzzzzzzzzzzzzzzzzzzzz";\n');
+
+  const scoped = await tools.security_audit({ path: 'other' }, dir);
+  assert.match(scoped, /b\.js/);
+  assert.doesNotMatch(scoped, /a\.js/);
+});
+
+test('security_audit sorts findings with HIGH severity before MEDIUM/LOW', async () => {
+  const dir = makeTempDir();
+  fs.writeFileSync(path.join(dir, 'mixed.js'), [
+    "const hash = crypto.createHash('md5').update(x).digest('hex'); // MEDIUM",
+    "eval(x); // HIGH",
+    '',
+  ].join('\n'));
+  const result = await tools.security_audit({}, dir);
+  const highIndex = result.indexOf('[HIGH]');
+  const mediumIndex = result.indexOf('[MEDIUM]');
+  assert.ok(highIndex >= 0 && mediumIndex >= 0, 'expected both severities to be present');
+  assert.ok(highIndex < mediumIndex, 'expected HIGH findings to be listed before MEDIUM ones');
+});
+
+test('security_audit truncates past 60 findings and saves the full report to .kode/scans/', async () => {
+  const dir = makeTempDir();
+  // 70 separate files, each with one HIGH eval() finding — cheap way to force >60
+  // total findings without relying on any single regex matching many times per line.
+  for (let i = 0; i < 70; i++) {
+    fs.writeFileSync(path.join(dir, `f${i}.js`), `eval(input${i});\n`);
+  }
+  const result = await tools.security_audit({}, dir);
+  assert.match(result, /found 70 candidate/);
+  assert.match(result, /more finding\(s\) not shown/);
+  assert.match(result, /saved to \.kode\/scans\//);
+
+  const scanFiles = fs.readdirSync(path.join(dir, '.kode', 'scans'));
+  assert.equal(scanFiles.length, 1);
+});
+
 test('run_command blocks catastrophic patterns without executing them', async () => {
   const destructive = ['rm -rf /', 'rm -rf ~', 'sudo rm -rf /Users', ':(){ :|:& };:', 'mkfs.ext4 /dev/sda1'];
   for (const command of destructive) {
