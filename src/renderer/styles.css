@@ -1500,6 +1500,33 @@ body.resizing-panel {
   color: var(--text-primary);
 }
 
+/* Whole-message copy button — sits at the bottom of the bubble (which already has
+   position: relative), hidden until the bubble is hovered so it doesn't clutter
+   every message. See createMessageElement() in components.js. */
+.message-copy-btn {
+  display: block;
+  margin-top: 10px;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 3px 8px;
+  border-radius: 4px;
+  transition: opacity 0.15s ease, background 0.2s ease, color 0.2s ease;
+  font-family: inherit;
+  opacity: 0;
+}
+
+.message-bubble:hover .message-copy-btn {
+  opacity: 1;
+}
+
+.message-copy-btn:hover {
+  background: rgba(255,255,255,0.08);
+  color: var(--text-primary);
+}
+
 .code-block-wrapper pre {
   margin: 0;
   padding: 14px;

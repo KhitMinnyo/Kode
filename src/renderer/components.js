@@ -157,6 +157,30 @@
       });
     }
 
+    // Copy-to-clipboard for the whole message (assistant & error only — a user
+    // message is just what you typed, nothing to copy back out). Copies the raw
+    // markdown/text `content`, not the rendered HTML, so pasting elsewhere keeps
+    // code fences, lists, etc. intact instead of losing structure. Hidden until
+    // hover so it doesn't clutter every bubble — previously the only way to grab
+    // a whole reply was manually click-dragging to select across the bubble.
+    if (role === 'assistant' || role === 'error') {
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'message-copy-btn';
+      copyBtn.type = 'button';
+      copyBtn.title = 'Copy message';
+      copyBtn.textContent = '📋 Copy';
+      copyBtn.addEventListener('click', () => {
+        navigator.clipboard.writeText(content).then(() => {
+          copyBtn.textContent = '✅ Copied';
+          setTimeout(() => { copyBtn.textContent = '📋 Copy'; }, 1500);
+        }).catch(() => {
+          copyBtn.textContent = '❌ Failed';
+          setTimeout(() => { copyBtn.textContent = '📋 Copy'; }, 1500);
+        });
+      });
+      bubble.appendChild(copyBtn);
+    }
+
     return msg;
   }
 
