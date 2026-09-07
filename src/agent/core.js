@@ -680,9 +680,13 @@ ${newlyDroppedText}`;
         const nativeToolCalls = chatResult.toolCalls || [];
 
         if (!this._isGenerating) {
-          // Generation was stopped mid-stream
-          finalResponse = currentResponse;
-          conversationHistory.push({ role: 'assistant', content: currentResponse });
+          // Generation was stopped mid-stream — a deliberate user action (Stop button),
+          // not the connection going silent on its own. Labeled distinctly from the
+          // stall give-up messages above/below so the transcript makes clear WHY the
+          // turn ended short: stopped-by-you vs. stalled-and-gave-up look identical
+          // otherwise (both are a truncated response with no tool calls).
+          finalResponse = (currentResponse ? currentResponse + '\n\n' : '') + '⏹️ Stopped.';
+          conversationHistory.push({ role: 'assistant', content: finalResponse });
           break;
         }
 
@@ -694,14 +698,32 @@ ${newlyDroppedText}`;
         // have tool_calls instead — that's not a failure, so only nudge-retry when there's
         // no text AND no native tool call to fall back on.
         if ((!currentResponse || currentResponse.length < 2) && nativeToolCalls.length === 0) {
-          console.warn(`[AgentCore] Empty response at iteration ${iteration}, retrying with nudge`);
+          // A stalled connection (client's 5min stall timeout) can also land here with
+          // empty text — that's not the same as the model simply producing nothing on
+          // its own, and retrying it forever would just burn through MAX_TOOL_ITERATIONS
+          // silently. Count it against the same stall budget as the "stopped mid-task"
+          // nudges below, and give up with a clear message once that budget is spent.
+          const stalledEmpty = chatResult.stalled === true;
+          if (stalledEmpty && consecutiveStalls >= MAX_STALL_NUDGES) {
+            finalResponse = `⚠️ The connection stalled repeatedly (${MAX_STALL_NUDGES} attempts) before the model produced a response. Try again, or check your connection or model.`;
+            conversationHistory.push({ role: 'assistant', content: finalResponse });
+            break;
+          }
+          if (stalledEmpty) {
+            consecutiveStalls++;
+            console.warn(`[AgentCore] Stream stalled with no response at iteration ${iteration} (stall ${consecutiveStalls}/${MAX_STALL_NUDGES}), retrying with nudge`);
+          } else {
+            console.warn(`[AgentCore] Empty response at iteration ${iteration}, retrying with nudge`);
+          }
           conversationHistory.push({
             role: 'assistant',
             content: '(thinking...)',
           });
           conversationHistory.push({
             role: 'user',
-            content: 'Please proceed with the task. Start by listing the project files, then read the key files, and take action.',
+            content: stalledEmpty
+              ? 'Your last response stalled before producing anything (connection issue). Please try again and proceed with the task.'
+              : 'Please proceed with the task. Start by listing the project files, then read the key files, and take action.',
           });
           continue; // retry
         }
@@ -754,15 +776,35 @@ ${newlyDroppedText}`;
           // the plan is finished" bug: it only happened on turns where the model's last
           // message happened to contain a checkmark for some other reason.
           const hasDoneMarker = /✅\s*done\b/i.test(currentResponse);
-          if (allToolResults.length > 0 && !hasDoneMarker && consecutiveStalls < MAX_STALL_NUDGES) {
+          // A stall-timeout abort (chatResult.stalled) can also land here: the client
+          // gives back whatever partial text it had buffered (or none) with no tool
+          // calls, which looks exactly like a legitimate finished answer unless we check
+          // for it explicitly. Nudge on a stall even when allToolResults is still empty
+          // (a stall can happen on the very first iteration, before any tool work) —
+          // that's the one case the plain "no tool calls" exemption above must NOT apply to.
+          const stalled = chatResult.stalled === true;
+          if ((stalled || (allToolResults.length > 0 && !hasDoneMarker)) && consecutiveStalls < MAX_STALL_NUDGES) {
             consecutiveStalls++;
-            console.warn(`[AgentCore] Stopped without a "✅ Done" marker after doing tool work (stall ${consecutiveStalls}/${MAX_STALL_NUDGES}) — nudging to continue or confirm.`);
+            console.warn(`[AgentCore] ${stalled ? 'Stream stalled' : 'Stopped without a "✅ Done" marker'} (stall ${consecutiveStalls}/${MAX_STALL_NUDGES}) — nudging to continue or confirm.`);
             conversationHistory.push({ role: 'assistant', content: currentResponse });
             conversationHistory.push({
               role: 'user',
-              content: `You stopped without saying "✅ Done:" — is the task actually finished? If there's more to do, keep going right now and call the next tool yourself — don't wait for me to ask. If it's genuinely complete, say so explicitly starting with "✅ Done:" and summarize what changed.`,
+              content: stalled
+                ? `Your last response was cut off by a stalled connection. Please continue from where you left off and keep going with the task.`
+                : `You stopped without saying "✅ Done:" — is the task actually finished? If there's more to do, keep going right now and call the next tool yourself — don't wait for me to ask. If it's genuinely complete, say so explicitly starting with "✅ Done:" and summarize what changed.`,
             });
             continue; // retry
+          }
+
+          // Stall nudges exhausted and this was still a genuine stall (not just a
+          // missing "✅ Done" marker) — give up plainly instead of quietly presenting a
+          // cut-off/garbled partial response as if it were the model's real, complete
+          // answer.
+          if (stalled) {
+            finalResponse = (currentResponse ? currentResponse + '\n\n' : '') +
+              `⚠️ The connection kept stalling after ${MAX_STALL_NUDGES} retries. This response may be incomplete — try again, or check your connection or model.`;
+            conversationHistory.push({ role: 'assistant', content: finalResponse });
+            break;
           }
 
           // No tool calls attempted — we're done

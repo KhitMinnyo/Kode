@@ -29,6 +29,10 @@ class CustomClient {
   constructor(apiKey = '', baseUrl = '', contextSize = DEFAULT_CONTEXT_SIZE) {
     this.apiKey = apiKey;
     this._abortController = null;
+    // Set right before calling abort() on the current request, so the catch block
+    // below (and callers) can tell a stall-triggered abort apart from the user
+    // clicking Stop — both ultimately call the same AbortController.
+    this._abortReason = null;
     this.updateContextSize(contextSize);
     this.updateBaseUrl(baseUrl);
   }
@@ -295,7 +299,10 @@ class CustomClient {
     const armStallTimeout = () => {
       clearTimeout(firstTokenTimeout);
       firstTokenTimeout = setTimeout(() => {
-        if (this._abortController) this._abortController.abort();
+        if (this._abortController) {
+          this._abortReason = 'stall';
+          this._abortController.abort();
+        }
       }, STALL_TIMEOUT);
     };
     armStallTimeout();
@@ -347,13 +354,18 @@ class CustomClient {
     } catch (err) {
       clearTimeout(firstTokenTimeout);
       if (err.message === 'Request aborted') {
-        if (!firstTokenTime) return { text: '⏱️ Model took too long to respond. Try a different model or simplify your request.', toolCalls: [] };
-        return { text: fullResponse, toolCalls: [] };
+        // A user-clicked Stop also lands here (same AbortController), but that path
+        // never sets _abortReason to 'stall' — see abort() below — so `stalled` only
+        // ever ends up true for an actual stall timeout, never a deliberate user stop.
+        const stalled = this._abortReason === 'stall';
+        if (!firstTokenTime) return { text: '⏱️ Model took too long to respond. Try a different model or simplify your request.', toolCalls: [], stalled };
+        return { text: fullResponse, toolCalls: [], stalled };
       }
       throw err;
     } finally {
       clearTimeout(firstTokenTimeout);
       this._abortController = null;
+      this._abortReason = null;
     }
 
     const toolCalls = Object.values(toolCallAccumulator).map((tc) => ({ function: { name: tc.function.name, arguments: tc.function.arguments } }));
@@ -362,6 +374,7 @@ class CustomClient {
 
   abort() {
     if (this._abortController) {
+      this._abortReason = 'user';
       this._abortController.abort();
       this._abortController = null;
     }

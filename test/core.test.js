@@ -303,3 +303,99 @@ test('processMessage threads the ollamaClient/embedClient into toolContext for s
   // Should NOT hit the "requires the Ollama provider" error, since embedClient was wired through.
   assert.doesNotMatch(searchResult.result, /requires the Ollama provider/);
 });
+
+test('processMessage gives up gracefully when the client stalls repeatedly with no response at all', async () => {
+  // Every call comes back empty with stalled: true (as Ollama/DeepSeek/OpenAI/Anthropic/
+  // Custom clients now report — see the shared armStallTimeout/_abortReason pattern in
+  // each client). Without stall-awareness this used to just retry the generic "Please
+  // proceed with the task" nudge up to MAX_TOOL_ITERATIONS times; it should instead give
+  // up after MAX_STALL_NUDGES (3) attempts with a clear message.
+  let chatCallCount = 0;
+  const mockClient = {
+    getContextSize: async () => 8192,
+    abort() {},
+    chat: async () => {
+      chatCallCount++;
+      return { text: '', toolCalls: [], stalled: true };
+    },
+  };
+
+  const core = new AgentCore(mockClient, 8192, 'ollama');
+  const result = await core.processMessage('do something', 'test-model', [], () => {}, () => {}, null, () => {});
+
+  assert.equal(chatCallCount, 4, 'expected 3 stall-nudge retries plus 1 final give-up, not a full MAX_TOOL_ITERATIONS loop');
+  assert.match(result.response, /stalled repeatedly/i);
+});
+
+test('processMessage nudges on a stalled-but-nonempty response even before any tool work, then gives up', async () => {
+  // A stall can abort mid-stream after some text already arrived, with no tool calls —
+  // that used to look identical to a legitimately finished plain-text answer (the
+  // "no tool calls attempted, allToolResults.length === 0" exemption). It must still be
+  // nudged/retried when chatResult.stalled is true, regardless of allToolResults.
+  let chatCallCount = 0;
+  const mockClient = {
+    getContextSize: async () => 8192,
+    abort() {},
+    chat: async () => {
+      chatCallCount++;
+      return { text: 'partial output before the connection stalled', toolCalls: [], stalled: true };
+    },
+  };
+
+  const core = new AgentCore(mockClient, 8192, 'ollama');
+  const result = await core.processMessage('do something', 'test-model', [], () => {}, () => {}, null, () => {});
+
+  assert.equal(chatCallCount, 4, 'expected 3 stall-nudge retries plus 1 final give-up');
+  assert.match(result.response, /kept stalling/i);
+  assert.match(result.response, /partial output before the connection stalled/);
+});
+
+test('processMessage nudges a stall that happens after real tool work, then gives up with the partial text preserved', async () => {
+  let chatCallCount = 0;
+  const mockClient = {
+    getContextSize: async () => 8192,
+    abort() {},
+    chat: async () => {
+      chatCallCount++;
+      if (chatCallCount === 1) {
+        return {
+          text: '```tool\n{"tool": "run_command", "params": {"command": "echo hi"}}\n```',
+          toolCalls: [],
+        };
+      }
+      return { text: 'still summarizing the result', toolCalls: [], stalled: true };
+    },
+  };
+
+  const core = new AgentCore(mockClient, 8192, 'ollama');
+  const result = await core.processMessage('run echo hi', 'test-model', [], () => {}, () => {}, null, () => {});
+
+  // 1 tool-call turn + 3 stall-nudge retries + 1 final give-up
+  assert.equal(chatCallCount, 5);
+  assert.match(result.response, /kept stalling/i);
+
+  const runCommandResult = result.toolResults.find(t => t.tool === 'run_command');
+  assert.ok(runCommandResult, 'expected run_command to have actually run before the stall');
+});
+
+test('processMessage labels a user-initiated Stop distinctly from a stall in the final response', async () => {
+  // stopGeneration() sets _isGenerating = false, which processMessage checks right
+  // after each chat() call returns. Simulate the user clicking Stop mid-turn by
+  // flipping that flag from inside the mock client itself.
+  const mockClient = {
+    getContextSize: async () => 8192,
+    abort() {},
+    chat: async () => {
+      core.stopGeneration();
+      return { text: 'partial answer before the user hit stop', toolCalls: [] };
+    },
+  };
+
+  const core = new AgentCore(mockClient, 8192, 'ollama');
+  const result = await core.processMessage('do something', 'test-model', [], () => {}, () => {}, null, () => {});
+
+  assert.match(result.response, /⏹️ Stopped\./);
+  assert.match(result.response, /partial answer before the user hit stop/);
+  // Must not be confused with the stall give-up wording.
+  assert.doesNotMatch(result.response, /kept stalling/i);
+});
