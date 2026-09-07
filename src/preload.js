@@ -290,4 +290,28 @@ contextBridge.exposeInMainWorld('kode', {
    * @returns {Promise<{success: boolean, error?: string}>}
    */
   respondConfirmCommand: (requestId, approved) => ipcRenderer.invoke('confirm-command-response', { requestId, approved }),
+
+  // ─── ask_user ─────────────────────────────────────────────────────────────
+  // When the agent calls the ask_user tool because it's genuinely blocked, this
+  // pauses the turn and asks here — see main.js's makeAskUserCallback.
+
+  /**
+   * Register a callback for when the agent has a direct question for the user.
+   * Respond with respondAskUser(requestId, answer).
+   * @param {function({requestId: string, question: string, options: string[], tabId: string}): void} callback
+   * @returns {function(): void} Cleanup function to remove the listener
+   */
+  onAskUserRequest: (callback) => {
+    const handler = (_event, data) => callback(data);
+    ipcRenderer.on('ask-user-request', handler);
+    return () => ipcRenderer.removeListener('ask-user-request', handler);
+  },
+
+  /**
+   * Answer a pending ask-user-request.
+   * @param {string} requestId
+   * @param {string} answer - a clicked option's label, or free-text; empty/omitted counts as no response.
+   * @returns {Promise<{success: boolean, error?: string}>}
+   */
+  respondAskUser: (requestId, answer) => ipcRenderer.invoke('ask-user-response', { requestId, answer }),
 });

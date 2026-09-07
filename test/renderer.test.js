@@ -92,11 +92,13 @@ async function bootApp() {
     sendMessageCalls: [],
     stopGenerationCalls: [],
     closeTabCalls: [],
+    respondAskUserCalls: [],
     onStreamToken: null,
     onToolExecution: null,
     onStreamEnd: null,
     onStreamError: null,
     onAgentStatus: null,
+    onAskUserRequest: null,
   };
   let chatCounter = 0;
 
@@ -135,6 +137,11 @@ async function bootApp() {
     onStreamError: (cb) => { captured.onStreamError = cb; return () => {}; },
     onAgentStatus: (cb) => { captured.onAgentStatus = cb; return () => {}; },
     onConfirmCommandRequest: () => () => {},
+    onAskUserRequest: (cb) => { captured.onAskUserRequest = cb; return () => {}; },
+    respondAskUser: async (requestId, answer) => {
+      captured.respondAskUserCalls.push({ requestId, answer });
+      return { success: true };
+    },
   };
 
   // jsdom doesn't implement requestAnimationFrame by default.
@@ -157,7 +164,7 @@ async function bootApp() {
   return { dom, window, document, captured };
 }
 
-test('renderer parallel tabs', async (t) => {
+test('renderer parallel tabs and ask_user modal', async (t) => {
   const { dom, document, captured } = await bootApp();
   // app.js's init() unconditionally starts a real setInterval (the periodic
   // connection health-check) that outlives any of our stimuli and would
@@ -260,5 +267,64 @@ test('renderer parallel tabs', async (t) => {
     const pills = document.querySelectorAll('.tab-pill');
     assert.equal(pills.length, 1);
     assert.ok(messages().textContent.includes('Reply for tab 2'));
+  });
+
+  // ask_user modal (see src/agent/tools.js's ask_user tool and app.js's
+  // setupAskUserListener) — reuses this same booted app instance rather than
+  // calling bootApp() again, since a second full app boot in this file left a
+  // dangling handle that kept the test process from exiting cleanly.
+  await t.test('a question with options shows the question and renders one button per option', async () => {
+    assert.ok(typeof captured.onAskUserRequest === 'function', 'expected setupAskUserListener to have registered onAskUserRequest');
+
+    captured.onAskUserRequest({ requestId: 'req-1', question: 'Which database should this use?', options: ['SQLite', 'Postgres'], tabId: 'tab1' });
+
+    const overlay = document.getElementById('ask-user-overlay');
+    assert.ok(overlay.classList.contains('active'), 'expected the modal to open');
+    assert.equal(document.getElementById('ask-user-question').textContent, 'Which database should this use?');
+
+    const optionsEl = document.getElementById('ask-user-options');
+    assert.equal(optionsEl.hidden, false);
+    const buttons = optionsEl.querySelectorAll('.ask-user-option-btn');
+    assert.equal(buttons.length, 2);
+    assert.equal(buttons[0].textContent, 'SQLite');
+    assert.equal(buttons[1].textContent, 'Postgres');
+  });
+
+  await t.test('clicking an option button responds with that option and closes the modal', async () => {
+    const optionsEl = document.getElementById('ask-user-options');
+    optionsEl.querySelectorAll('.ask-user-option-btn')[1].click();
+
+    assert.equal(captured.respondAskUserCalls.length, 1);
+    assert.deepEqual(captured.respondAskUserCalls[0], { requestId: 'req-1', answer: 'Postgres' });
+    assert.ok(!document.getElementById('ask-user-overlay').classList.contains('active'), 'expected the modal to close after answering');
+  });
+
+  await t.test('a question with no options hides the button row and free-text still answers it', async () => {
+    captured.onAskUserRequest({ requestId: 'req-2', question: 'What should the admin email be?', options: [], tabId: 'tab1' });
+
+    const overlay = document.getElementById('ask-user-overlay');
+    assert.ok(overlay.classList.contains('active'));
+    assert.equal(document.getElementById('ask-user-options').hidden, true, 'expected no option buttons for an open-ended question');
+
+    const freetext = document.getElementById('ask-user-freetext');
+    freetext.value = 'admin@example.com';
+    document.getElementById('ask-user-send-btn').click();
+
+    assert.equal(captured.respondAskUserCalls.length, 2);
+    assert.deepEqual(captured.respondAskUserCalls[1], { requestId: 'req-2', answer: 'admin@example.com' });
+    assert.ok(!overlay.classList.contains('active'));
+    assert.equal(freetext.value, '', 'expected the free-text field to clear after answering');
+  });
+
+  await t.test('question/option text is inserted as text, never interpreted as HTML', async () => {
+    captured.onAskUserRequest({ requestId: 'req-3', question: '<img src=x onerror=alert(1)>', options: ['<b>bold option</b>'], tabId: 'tab1' });
+
+    const questionEl = document.getElementById('ask-user-question');
+    assert.equal(questionEl.querySelector('img'), null, 'expected no actual <img> element to have been created');
+    assert.equal(questionEl.textContent, '<img src=x onerror=alert(1)>');
+
+    const optionBtn = document.getElementById('ask-user-options').querySelector('.ask-user-option-btn');
+    assert.equal(optionBtn.querySelector('b'), null, 'expected no actual <b> element to have been created');
+    assert.equal(optionBtn.textContent, '<b>bold option</b>');
   });
 });

@@ -45,6 +45,13 @@ const pendingCommandConfirmations = new Map(); // requestId -> resolve(approved:
 let commandConfirmationCounter = 0;
 const CONFIRM_COMMAND_TIMEOUT_MS = 2 * 60 * 1000; // fail safe (deny) if nobody answers
 
+// Outstanding "ask_user" round-trips to the renderer, same shape as the command-
+// confirmation pair above — keyed by requestId. See the 'ask-user-request'/
+// 'ask-user-response' pair below and src/agent/tools.js's ask_user.
+const pendingAskUserRequests = new Map(); // requestId -> resolve(answer: string|null)
+let askUserRequestCounter = 0;
+const ASK_USER_TIMEOUT_MS = 5 * 60 * 1000; // longer than command-confirm — answering a real question takes more thought than approve/block
+
 // ─── Settings ────────────────────────────────────────────────────────────────
 const SETTINGS_FILE = path.join(app.getPath('userData'), 'kode-settings.json');
 
@@ -481,6 +488,40 @@ function makeConfirmCommandCallback(sender, tabId) {
   };
 }
 
+/**
+ * Builds the onAskUser callback threaded into AgentCore.processMessage for a single
+ * send-message call. Unlike makeConfirmCommandCallback, this isn't gated behind a
+ * Settings toggle — asking a question when genuinely blocked isn't an opt-in safety
+ * feature the way risky-command confirmation is, it's just how the agent talks to
+ * the user for a real blocker.
+ *
+ * Sends an 'ask-user-request' event to the renderer and waits for the matching
+ * 'ask-user-response' IPC call (see registerIPCHandlers below). If the window is
+ * gone or nobody responds within ASK_USER_TIMEOUT_MS, resolves null rather than
+ * hanging the agent loop forever — ask_user (tools.js) turns that into a "no
+ * response, use your best judgment" tool result.
+ */
+function makeAskUserCallback(sender, tabId) {
+  return (question, options) => {
+    if (sender.isDestroyed()) return Promise.resolve(null);
+
+    const requestId = String(++askUserRequestCounter);
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        pendingAskUserRequests.delete(requestId);
+        resolve(null);
+      }, ASK_USER_TIMEOUT_MS);
+
+      pendingAskUserRequests.set(requestId, (answer) => {
+        clearTimeout(timer);
+        resolve(answer);
+      });
+
+      sender.send('ask-user-request', { requestId, question, options, tabId });
+    });
+  };
+}
+
 // ─── Window Creation ─────────────────────────────────────────────────────────
 
 function createMainWindow() {
@@ -712,7 +753,10 @@ function registerIPCHandlers() {
           // onConfirmCommand callback — ask the renderer to approve/block a risky
           // run_command pattern before it executes (null/skipped when the user has
           // turned the Settings → Safety toggle off).
-          makeConfirmCommandCallback(sender, effectiveTabId)
+          makeConfirmCommandCallback(sender, effectiveTabId),
+          // onAskUser callback — ask the renderer to show the ask_user tool's
+          // question inline and wait for the person's answer.
+          makeAskUserCallback(sender, effectiveTabId)
         );
 
       // Notify renderer that streaming is complete
@@ -812,6 +856,20 @@ function registerIPCHandlers() {
     if (!resolve) return { success: false, error: 'No pending confirmation for this requestId (it may have already timed out).' };
     pendingCommandConfirmations.delete(requestId);
     resolve(!!approved);
+    return { success: true };
+  });
+
+  /**
+   * Renderer's answer to an 'ask-user-request' event (see makeAskUserCallback
+   * above) — resolves the matching pending Promise that ask_user is awaiting.
+   * `answer` should be a non-empty string (a clicked option's label, or free text);
+   * anything else is treated the same as no response.
+   */
+  ipcMain.handle('ask-user-response', (event, { requestId, answer }) => {
+    const resolve = pendingAskUserRequests.get(requestId);
+    if (!resolve) return { success: false, error: 'No pending question for this requestId (it may have already timed out).' };
+    pendingAskUserRequests.delete(requestId);
+    resolve(typeof answer === 'string' && answer.trim() ? answer.trim() : null);
     return { success: true };
   });
 

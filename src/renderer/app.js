@@ -169,6 +169,7 @@
     setupMemoryListeners();
     setupProcessesListeners();
     setupCommandConfirmListener();
+    setupAskUserListener();
     setupAttachmentListeners();
     setupPanelResizers();
     loadAppVersion();
@@ -2264,6 +2265,72 @@
       // and must never be interpreted as HTML.
       if (textEl) textEl.textContent = command;
       overlay.classList.add('active');
+    });
+  }
+
+  /* ==========================================================
+     Ask User Modal
+     (shown when the agent calls the ask_user tool because it's
+     genuinely blocked and needs input only the user can give —
+     see src/agent/tools.js's ask_user and main.js's
+     makeAskUserCallback)
+     ========================================================== */
+  function setupAskUserListener() {
+    const overlay = document.getElementById('ask-user-overlay');
+    const questionEl = document.getElementById('ask-user-question');
+    const optionsEl = document.getElementById('ask-user-options');
+    const freetextEl = document.getElementById('ask-user-freetext');
+    const sendBtn = document.getElementById('ask-user-send-btn');
+    if (!overlay || !window.kode.onAskUserRequest) return;
+
+    let activeRequestId = null;
+
+    const respond = (answer) => {
+      if (!activeRequestId) return;
+      const requestId = activeRequestId;
+      activeRequestId = null;
+      overlay.classList.remove('active');
+      if (freetextEl) freetextEl.value = '';
+      window.kode.respondAskUser(requestId, answer).catch(() => {});
+    };
+
+    if (sendBtn) sendBtn.addEventListener('click', () => respond(freetextEl ? freetextEl.value : ''));
+    if (freetextEl) {
+      // Cmd/Ctrl+Enter submits without leaving the textarea — plain Enter stays a
+      // newline since answers can reasonably be more than one line.
+      freetextEl.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+          e.preventDefault();
+          respond(freetextEl.value);
+        }
+      });
+    }
+    // No overlay-click / Escape-to-dismiss on purpose — same reasoning as the risky-
+    // command modal: an accidental dismiss must never be silently treated as an answer.
+
+    window.kode.onAskUserRequest(({ requestId, question, options }) => {
+      activeRequestId = requestId;
+      // textContent (not innerHTML) — question/options are untrusted (model output)
+      // and must never be interpreted as HTML.
+      if (questionEl) questionEl.textContent = question;
+
+      if (optionsEl) {
+        optionsEl.innerHTML = '';
+        const opts = Array.isArray(options) ? options : [];
+        optionsEl.hidden = opts.length === 0;
+        for (const opt of opts) {
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'ask-user-option-btn';
+          btn.textContent = opt;
+          btn.addEventListener('click', () => respond(opt));
+          optionsEl.appendChild(btn);
+        }
+      }
+
+      if (freetextEl) freetextEl.value = '';
+      overlay.classList.add('active');
+      if (freetextEl) freetextEl.focus();
     });
   }
 

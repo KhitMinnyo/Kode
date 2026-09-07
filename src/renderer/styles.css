@@ -2266,6 +2266,36 @@ body.resizing-panel {
   border-color: var(--warning);
 }
 
+/* Ask-user modal (see src/agent/tools.js's ask_user tool) */
+.ask-user-modal {
+  width: 480px;
+}
+
+.ask-user-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 4px 0 16px;
+}
+
+.ask-user-option-btn {
+  padding: 8px 16px;
+  border: 1px solid var(--border-glass);
+  border-radius: 999px;
+  background: rgba(99, 102, 241, 0.08);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.ask-user-option-btn:hover {
+  background: rgba(99, 102, 241, 0.18);
+  border-color: var(--accent-primary);
+}
+
 /* Memory panel */
 .memory-list {
   display: flex;
@@ -2459,6 +2489,31 @@ body.resizing-panel {
 }
 
 .settings-field input::placeholder {
+  color: var(--text-muted);
+  opacity: 0.6;
+}
+
+.settings-field textarea {
+  width: 100%;
+  padding: 10px 14px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+  outline: none;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.settings-field textarea:focus {
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
+}
+
+.settings-field textarea::placeholder {
   color: var(--text-muted);
   opacity: 0.6;
 }

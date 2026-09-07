@@ -1629,6 +1629,53 @@ async function recall_memory(params, projectFolder, toolContext = {}) {
   }
 }
 
+/**
+ * Tool: ask_user
+ * Pauses the current turn to ask the person a direct question — for a genuine
+ * blocker where the agent truly cannot reasonably proceed without input only they
+ * can give (a choice between meaningfully different approaches, a missing
+ * credential/detail that can't be discovered another way, confirmation before an
+ * action outside what run_command's own risky-command gate already covers). This is
+ * NOT for routine progress updates, or anything the agent could reasonably decide
+ * on its own — see the system prompt's "Direct Action vs Planning" guidance:
+ * default to just doing the work, and only reach for this when actually stuck.
+ *
+ * Follows the same IPC round-trip pattern as run_command's risky-command
+ * confirmation (see main.js's makeAskUserCallback / makeConfirmCommandCallback):
+ * toolContext.askUser sends the question to the renderer, which shows it inline
+ * (with the given options as quick-pick buttons, if any, plus a free-text field
+ * either way) and this call blocks until the person answers or a generous timeout
+ * elapses. Only available when the caller (main.js) supplies toolContext.askUser —
+ * e.g. not when processMessage is driven headlessly with no UI to ask through.
+ */
+async function ask_user(params, projectFolder, toolContext = {}) {
+  const { question, options } = params;
+
+  if (!question || typeof question !== 'string' || !question.trim()) {
+    return '❌ Error: "question" parameter is required (what you need to ask the user).';
+  }
+
+  const normalizedOptions = Array.isArray(options)
+    ? options.filter((o) => typeof o === 'string' && o.trim()).slice(0, 6).map((o) => o.trim())
+    : [];
+
+  if (typeof toolContext.askUser !== 'function') {
+    return '❌ ask_user is unavailable right now (no UI to ask through). ' +
+      'Proceed with your best judgment instead, or explain in your response what you need and why you\'re stuck.';
+  }
+
+  try {
+    const answer = await toolContext.askUser(question.trim(), normalizedOptions);
+    if (answer === null || answer === undefined || (typeof answer === 'string' && !answer.trim())) {
+      return '⏱️ No response — the user did not answer in time. Proceed with your best judgment, ' +
+        'or clearly state what you need and stop rather than guessing on something that matters.';
+    }
+    return `💬 User answered: ${answer}`;
+  } catch (err) {
+    return `❌ Error asking user: ${err.message}`;
+  }
+}
+
 // Export all tools as a name→handler map
 const tools = {
   create_file,
@@ -1652,6 +1699,7 @@ const tools = {
   write_plan,
   index_codebase,
   semantic_search,
+  ask_user,
 };
 
 /**
@@ -1974,6 +2022,21 @@ const TOOL_SCHEMAS = [
           limit: { type: 'number', description: 'Max results to return, defaults to 8.' },
         },
         required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'ask_user',
+      description: 'Pause and ask the user a direct question when genuinely blocked and unable to proceed without their input — a choice only they can make, a missing detail/credential, or confirmation before something you\'re unsure about. Not for routine updates or anything you could reasonably decide yourself; default to just doing the work.',
+      parameters: {
+        type: 'object',
+        properties: {
+          question: { type: 'string', description: 'The question to ask, in plain language.' },
+          options: { type: 'array', items: { type: 'string' }, description: 'Optional short button labels for the user to pick from (e.g. ["Option A", "Option B"]). Omit for a free-text/open question.' },
+        },
+        required: ['question'],
       },
     },
   },

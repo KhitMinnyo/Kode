@@ -246,6 +246,80 @@ test('processMessage never consults onConfirmCommand when it is not provided (de
   assert.doesNotMatch(runCommandResult.result, /🚫 Blocked/);
 });
 
+test('processMessage threads onAskUser through to an ask_user tool call and feeds the answer back', async () => {
+  let chatCallCount = 0;
+  const mockClient = {
+    getContextSize: async () => 8192,
+    abort() {},
+    chat: async () => {
+      chatCallCount++;
+      if (chatCallCount === 1) {
+        // First turn: the model is genuinely blocked and asks the user directly.
+        return {
+          text: '```tool\n{"tool": "ask_user", "params": {"question": "Which database should this use?", "options": ["SQLite", "Postgres"]}}\n```',
+          toolCalls: [],
+        };
+      }
+      // Second turn: the model has the tool result (the user's answer) in context.
+      return { text: '✅ Done: will use Postgres as requested.', toolCalls: [] };
+    },
+  };
+
+  const core = new AgentCore(mockClient, 8192, 'ollama');
+  const askCalls = [];
+  const onAskUser = async (question, options) => {
+    askCalls.push({ question, options });
+    return 'Postgres'; // simulate the user clicking the "Postgres" option in the renderer modal
+  };
+
+  const result = await core.processMessage(
+    'set up the database for this project',
+    'test-model',
+    [],
+    () => {},          // onToken
+    () => {},          // onToolExecution
+    null,               // projectFolder
+    () => {},          // onStatus
+    null,               // onConfirmCommand
+    onAskUser
+  );
+
+  assert.equal(askCalls.length, 1, 'expected the ask-user callback to be consulted exactly once');
+  assert.equal(askCalls[0].question, 'Which database should this use?');
+  assert.deepEqual(askCalls[0].options, ['SQLite', 'Postgres']);
+
+  const askResult = result.toolResults.find(t => t.tool === 'ask_user');
+  assert.ok(askResult, 'expected an ask_user tool result');
+  assert.match(askResult.result, /User answered: Postgres/);
+  assert.match(result.response, /Postgres/);
+});
+
+test('processMessage reports ask_user as unavailable (not a hang) when onAskUser is not provided', async () => {
+  let chatCallCount = 0;
+  const mockClient = {
+    getContextSize: async () => 8192,
+    abort() {},
+    chat: async () => {
+      chatCallCount++;
+      if (chatCallCount === 1) {
+        return {
+          text: '```tool\n{"tool": "ask_user", "params": {"question": "Which database should this use?"}}\n```',
+          toolCalls: [],
+        };
+      }
+      return { text: '✅ Done: proceeded without an answer.', toolCalls: [] };
+    },
+  };
+
+  const core = new AgentCore(mockClient, 8192, 'ollama');
+  // No onAskUser arg — matches processMessage being driven with no UI to ask through.
+  const result = await core.processMessage('set up the database', 'test-model', [], () => {}, () => {}, null, () => {});
+
+  const askResult = result.toolResults.find(t => t.tool === 'ask_user');
+  assert.ok(askResult, 'expected an ask_user tool result');
+  assert.match(askResult.result, /unavailable/i);
+});
+
 test('_buildContextMessages falls back to a tool-name note when summarization fails', async () => {
   const mockClient = {
     getContextSize: async () => 2048,

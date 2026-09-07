@@ -507,6 +507,65 @@ test('recall_memory falls back to keyword search when no embedding client is pro
   assert.match(result, /dev-port/);
 });
 
+test('ask_user requires a question parameter', async () => {
+  const result = await tools.ask_user({}, null);
+  assert.match(result, /"question".*required/i);
+});
+
+test('ask_user reports itself unavailable when toolContext has no askUser callback', async () => {
+  const result = await tools.ask_user({ question: 'Which port should the server use?' }, null);
+  assert.match(result, /unavailable/i);
+  assert.match(result, /best judgment/i);
+});
+
+test('ask_user calls toolContext.askUser with the question and normalized options, and returns the answer', async () => {
+  let calledWith = null;
+  const toolContext = {
+    askUser: async (question, options) => {
+      calledWith = { question, options };
+      return 'Postgres';
+    },
+  };
+  const result = await tools.ask_user({ question: 'Which database?', options: ['SQLite', 'Postgres'] }, null, toolContext);
+  assert.deepEqual(calledWith, { question: 'Which database?', options: ['SQLite', 'Postgres'] });
+  assert.match(result, /User answered: Postgres/);
+});
+
+test('ask_user works with no options (open-ended question)', async () => {
+  let calledWith = null;
+  const toolContext = {
+    askUser: async (question, options) => {
+      calledWith = { question, options };
+      return 'admin@example.com';
+    },
+  };
+  const result = await tools.ask_user({ question: 'What should the admin email be?' }, null, toolContext);
+  assert.deepEqual(calledWith.options, []);
+  assert.match(result, /admin@example\.com/);
+});
+
+test('ask_user filters out non-string options and caps at 6', async () => {
+  let calledWith = null;
+  const toolContext = {
+    askUser: async (question, options) => { calledWith = options; return 'ok'; },
+  };
+  await tools.ask_user({ question: 'Pick one', options: ['a', 42, null, 'b', 'c', 'd', 'e', 'f', 'g'] }, null, toolContext);
+  assert.deepEqual(calledWith, ['a', 'b', 'c', 'd', 'e', 'f']);
+});
+
+test('ask_user reports no-response clearly when askUser resolves null (timeout)', async () => {
+  const toolContext = { askUser: async () => null };
+  const result = await tools.ask_user({ question: 'Are you there?' }, null, toolContext);
+  assert.match(result, /No response/);
+  assert.match(result, /best judgment/i);
+});
+
+test('ask_user surfaces an error from a throwing askUser callback without crashing', async () => {
+  const toolContext = { askUser: async () => { throw new Error('IPC channel closed'); } };
+  const result = await tools.ask_user({ question: 'Are you there?' }, null, toolContext);
+  assert.match(result, /Error asking user: IPC channel closed/);
+});
+
 test('web_search fails clearly without an API key configured', async () => {
   const original = process.env.BRAVE_SEARCH_API_KEY;
   delete process.env.BRAVE_SEARCH_API_KEY;

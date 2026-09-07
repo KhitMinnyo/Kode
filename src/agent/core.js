@@ -797,9 +797,15 @@ ${newlyDroppedText}`;
    *   true/false. Pass null (or omit) to skip confirmation entirely — e.g. when the user has turned
    *   the Settings → Safety toggle off — in which case run_command behaves exactly as before
    *   (auto-allowed with just a warning label). See src/agent/tools.js's run_command.
+   * @param {?function(string, string[]): (string|null|Promise<string|null>)} onAskUser - Called with
+   *   (question, options) when the model calls the ask_user tool to pause the turn on a genuine
+   *   blocker; should resolve to the user's answer (a string), or null if nobody answered in time.
+   *   Pass null (or omit) when there's no UI to ask through — ask_user then reports itself
+   *   unavailable rather than hanging, so the model falls back to its own best judgment. See
+   *   src/agent/tools.js's ask_user and main.js's makeAskUserCallback.
    * @returns {Promise<{response: string, toolResults: Array<{tool: string, params: object, result: string}>}>}
    */
-  async processMessage(userMessage, model, conversationHistory, onToken = () => {}, onToolExecution = () => {}, projectFolder = null, onStatus = () => {}, onConfirmCommand = null) {
+  async processMessage(userMessage, model, conversationHistory, onToken = () => {}, onToolExecution = () => {}, projectFolder = null, onStatus = () => {}, onConfirmCommand = null, onAskUser = null) {
     if (!userMessage || typeof userMessage !== 'string') {
       throw new Error('User message is required');
     }
@@ -1124,6 +1130,7 @@ ${newlyDroppedText}`;
         // of only cancelling the model's own request).
         const toolContext = {
           confirmRiskyCommand: onConfirmCommand,
+          askUser: onAskUser,
           ollamaClient: this.ollamaClient,
           embedClient: this.provider === 'ollama' ? this.ollamaClient : null,
           signal: this._toolAbortController.signal,

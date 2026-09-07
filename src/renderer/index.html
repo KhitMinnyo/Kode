@@ -536,6 +536,39 @@
     </div>
   </div>
 
+  <!-- ============== Ask User Modal ============== -->
+  <!-- Shown when the agent calls the ask_user tool because it's genuinely blocked
+       and needs input only the user can give (see src/agent/tools.js's ask_user and
+       main.js's makeAskUserCallback). No overlay-click-to-dismiss / no Escape
+       shortcut on purpose — same reasoning as the risky-command modal above: an
+       accidental dismiss must never be silently treated as an answer. -->
+  <div class="settings-overlay" id="ask-user-overlay">
+    <div class="settings-modal ask-user-modal">
+
+      <div class="settings-header">
+        <h2>💬 The agent has a question</h2>
+      </div>
+
+      <div class="settings-body">
+        <div class="settings-group">
+          <span class="field-hint" id="ask-user-question"></span>
+        </div>
+        <div class="ask-user-options" id="ask-user-options" hidden>
+          <!-- Option buttons rendered by JS from the tool call's params, if any were given -->
+        </div>
+        <div class="settings-field">
+          <label for="ask-user-freetext">Your answer</label>
+          <textarea id="ask-user-freetext" rows="3" placeholder="Type your answer…"></textarea>
+        </div>
+      </div>
+
+      <div class="settings-footer">
+        <button class="settings-save-btn" id="ask-user-send-btn">Send</button>
+      </div>
+
+    </div>
+  </div>
+
   <!-- App scripts — components first, then app logic -->
   <script src="components.js"></script>
   <script src="app.js"></script>

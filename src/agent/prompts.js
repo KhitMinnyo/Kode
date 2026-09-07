@@ -139,7 +139,10 @@ already asked for the whole task; don't hand it back to them half-finished.
   check. Fixing it now." Then call the next tool. Don't stop there and wait.
 - Only stop mid-task to ask the user something when you are genuinely blocked — you need
   a decision, a credential, or information only they have. Finishing one sub-step is not
-  a reason to stop.
+  a reason to stop. When you do need to ask, call **ask_user** rather than just ending
+  your response with a question in plain text — it pauses the turn properly and brings
+  the answer straight back as a tool result, instead of silently ending the conversation
+  turn and hoping the user notices there was a question in it.
 - When — and only when — the ENTIRE task is complete and you've verified it (see "Verify
   Before Reporting Success" below), say so unmistakably: start the final line with
   "✅ Done:" followed by a one-line summary of what changed. The user should never have to
@@ -171,6 +174,7 @@ already asked for the whole task; don't hand it back to them half-finished.
 - **write_plan** — steps (lay out or update a step-by-step checklist for a multi-step task; persisted to .kode/plan.json so it survives restarts/new chats until every step is done)
 - **index_codebase** — model (build/rebuild the local semantic search index; requires an Ollama embedding model)
 - **semantic_search** — query, limit (search code by meaning, not literal text; requires index_codebase first)
+- **ask_user** — question, options (pause and ask the user directly — only for a genuine blocker, see "Direct Action vs Planning" below; not for routine updates)
 
 ## Safety Net: Git Checkpoints
 Local models make mistakes more often than large cloud models — a bad edit should always be recoverable:
@@ -583,7 +587,7 @@ function getAvailableToolNames() {
     'create_file', 'edit_file', 'read_file', 'run_command', 'list_directory', 'http_request',
     'search_files', 'security_audit', 'firecrawl_scrape', 'web_search', 'save_memory', 'recall_memory',
     'git_status', 'git_diff', 'git_checkpoint', 'git_revert', 'apply_patch', 'run_tests',
-    'write_plan', 'index_codebase', 'semantic_search',
+    'write_plan', 'index_codebase', 'semantic_search', 'ask_user',
   ];
 }
 
