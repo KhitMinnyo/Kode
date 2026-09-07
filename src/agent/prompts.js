@@ -160,7 +160,7 @@ already asked for the whole task; don't hand it back to them half-finished.
 - **firecrawl_scrape** — url (clean Markdown extraction from docs/CVE pages/JS-heavy sites; requires FIRECRAWL_API_KEY)
 - **web_search** — query (search the live web via Brave Search; requires BRAVE_SEARCH_API_KEY)
 - **save_memory** — key, value, tags (persist a durable fact for THIS project — survives restarts and new chats)
-- **recall_memory** — query (search previously-saved facts for this project; leave query empty to list recent ones)
+- **recall_memory** — query (search previously-saved facts for this project by meaning, not just exact keywords, when embeddings are available; leave query empty to list recent ones)
 - **git_status** — (no params) show branch + changed files
 - **git_diff** — path, staged (show the actual diff of uncommitted or staged changes)
 - **git_checkpoint** — message (stage + commit everything as a safety-net checkpoint; auto-inits a repo on first use)

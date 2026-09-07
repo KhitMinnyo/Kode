@@ -321,6 +321,70 @@ test('recall_memory reports clearly when nothing matches', async () => {
   assert.match(result, /No saved memory matched/);
 });
 
+test('save_memory computes and stores an embedding vector when an embedding client is available', async () => {
+  const dir = makeTempDir();
+  const fakeClient = { embed: async () => [[1, 0, 0]] };
+  await tools.save_memory({ key: 'dev-port', value: 'App runs on port 5001', tags: ['flask'] }, dir, { embedClient: fakeClient });
+
+  const memory = require('../src/agent/memory');
+  const entries = memory.loadMemory(dir).entries;
+  assert.equal(entries.length, 1);
+  assert.deepEqual(entries[0].vector, [1, 0, 0]);
+});
+
+test('save_memory still succeeds (without a vector) when the embedding call itself fails', async () => {
+  const dir = makeTempDir();
+  const brokenClient = { embed: async () => { throw new Error('ollama unreachable'); } };
+  const result = await tools.save_memory({ key: 'dev-port', value: 'App runs on port 5001' }, dir, { embedClient: brokenClient });
+  assert.match(result, /🧠 Saved/);
+
+  const memory = require('../src/agent/memory');
+  const entries = memory.loadMemory(dir).entries;
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].vector, null);
+});
+
+test('save_memory does not touch embeddings at all when no embedding client is in toolContext', async () => {
+  const dir = makeTempDir();
+  const result = await tools.save_memory({ key: 'dev-port', value: 'App runs on port 5001' }, dir);
+  assert.match(result, /🧠 Saved/);
+  const memory = require('../src/agent/memory');
+  assert.equal(memory.loadMemory(dir).entries[0].vector, null);
+});
+
+test('recall_memory uses semantic search (and says so) when an embedding client and vectorized entries are available', async () => {
+  const dir = makeTempDir();
+  // Two entries whose embedding vectors clearly cluster apart, same setup style as
+  // the index_codebase/semantic_search fake-client test above.
+  const fakeClient = {
+    embed: async (model, input) => {
+      const texts = Array.isArray(input) ? input : [input];
+      return texts.map((t) => {
+        const lower = t.toLowerCase();
+        return lower.includes('port') || lower.includes('5001') ? [1, 0, 0] : [0, 1, 0];
+      });
+    },
+  };
+  await tools.save_memory({ key: 'dev-port', value: 'App runs on port 5001' }, dir, { embedClient: fakeClient });
+  await tools.save_memory({ key: 'db-choice', value: 'Using SQLite locally' }, dir, { embedClient: fakeClient });
+
+  const result = await tools.recall_memory({ query: 'what port does the server use' }, dir, { embedClient: fakeClient });
+  assert.match(result, /semantic match/);
+  assert.match(result, /dev-port/);
+});
+
+test('recall_memory falls back to keyword search when no embedding client is provided at recall time', async () => {
+  const dir = makeTempDir();
+  const fakeClient = { embed: async () => [[1, 0, 0]] };
+  // Saved WITH a vector...
+  await tools.save_memory({ key: 'dev-port', value: 'App runs on port 5001' }, dir, { embedClient: fakeClient });
+  // ...but recalled WITHOUT an embedding client — should still work via keyword
+  // overlap, not silently fail just because a vector happens to be on disk.
+  const result = await tools.recall_memory({ query: 'port' }, dir);
+  assert.doesNotMatch(result, /semantic match/);
+  assert.match(result, /dev-port/);
+});
+
 test('web_search fails clearly without an API key configured', async () => {
   const original = process.env.BRAVE_SEARCH_API_KEY;
   delete process.env.BRAVE_SEARCH_API_KEY;

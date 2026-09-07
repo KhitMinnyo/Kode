@@ -1261,7 +1261,7 @@ async function semantic_search(params = {}, projectFolder, toolContext = {}) {
  * summary, this is explicit, inspectable, and only written when the model decides
  * something is actually worth remembering long-term.
  */
-async function save_memory(params, projectFolder) {
+async function save_memory(params, projectFolder, toolContext = {}) {
   const { key, value, tags } = params;
 
   if (!projectFolder) {
@@ -1274,8 +1274,25 @@ async function save_memory(params, projectFolder) {
     return '❌ Error: "value" parameter is required (the fact/note to remember).';
   }
 
+  // Best-effort: embed the entry so recall_memory can do meaning-based search later,
+  // not just keyword overlap (see memory.semanticSearchMemory). Never blocks the
+  // save — embeddings only work with the Ollama provider (toolContext.embedClient is
+  // null for cloud providers, see core.js's toolContext construction), and a save
+  // should still succeed even if the embedding call itself fails.
+  let vector = null;
+  const client = toolContext.embedClient;
+  if (client && typeof client.embed === 'function') {
+    try {
+      const embedText = `${key.trim()} ${value.trim()} ${Array.isArray(tags) ? tags.join(' ') : ''}`.trim();
+      const [computed] = await client.embed(embeddings.DEFAULT_EMBED_MODEL, [embedText]);
+      if (Array.isArray(computed)) vector = computed;
+    } catch (err) {
+      console.warn('[save_memory] Failed to compute embedding, saving without one:', err.message);
+    }
+  }
+
   try {
-    const entry = memory.upsertMemoryEntry(projectFolder, key.trim(), value.trim(), Array.isArray(tags) ? tags : []);
+    const entry = memory.upsertMemoryEntry(projectFolder, key.trim(), value.trim(), Array.isArray(tags) ? tags : [], vector);
     return `🧠 Saved to project memory: [${entry.key}] ${entry.value}`;
   } catch (err) {
     return `❌ Error saving memory: ${err.message}`;
@@ -1284,11 +1301,15 @@ async function save_memory(params, projectFolder) {
 
 /**
  * Tool: recall_memory
- * Searches previously-saved project memory by keyword overlap. Use this when
- * something might have been established earlier in this project (conventions,
- * credentials locations, prior research) but isn't in the current context window.
+ * Searches previously-saved project memory for a natural-language query. Uses
+ * meaning-based (embedding) search when an Ollama embedding client is available and
+ * at least one saved entry has a stored vector (see save_memory), falling back to
+ * plain keyword overlap otherwise — so this works the same as before on the cloud
+ * providers or for entries saved before this existed. Use this when something might
+ * have been established earlier in this project (conventions, credentials
+ * locations, prior research) but isn't in the current context window.
  */
-async function recall_memory(params, projectFolder) {
+async function recall_memory(params, projectFolder, toolContext = {}) {
   const { query } = params;
 
   if (!projectFolder) {
@@ -1296,13 +1317,29 @@ async function recall_memory(params, projectFolder) {
   }
 
   try {
-    const results = memory.searchMemory(projectFolder, query || '', 8);
+    let results = [];
+    let usedSemantic = false;
+    const client = toolContext.embedClient;
+    if (client && typeof client.embed === 'function' && query && query.trim()) {
+      try {
+        results = await memory.semanticSearchMemory(projectFolder, client, query.trim(), 8);
+        usedSemantic = results.length > 0;
+      } catch (err) {
+        console.warn('[recall_memory] Semantic search failed, falling back to keyword search:', err.message);
+      }
+    }
+
+    if (!usedSemantic) {
+      results = memory.searchMemory(projectFolder, query || '', 8);
+    }
+
     if (results.length === 0) {
       return query
         ? `🧠 No saved memory matched "${query}".`
         : '🧠 No memory saved for this project yet.';
     }
-    return `🧠 Recalled memory${query ? ` for "${query}"` : ''}:\n${memory.formatMemoryEntries(results)}`;
+    const matchNote = usedSemantic ? ' (semantic match)' : '';
+    return `🧠 Recalled memory${query ? ` for "${query}"` : ''}${matchNote}:\n${memory.formatMemoryEntries(results)}`;
   } catch (err) {
     return `❌ Error recalling memory: ${err.message}`;
   }
@@ -1497,7 +1534,7 @@ const TOOL_SCHEMAS = [
     type: 'function',
     function: {
       name: 'recall_memory',
-      description: 'Search this project\'s long-term memory for previously-saved facts/notes that might not be in the current context window.',
+      description: 'Search this project\'s long-term memory for previously-saved facts/notes that might not be in the current context window. Uses meaning-based (semantic) search when available, so natural-language phrasing works even without exact keyword matches.',
       parameters: {
         type: 'object',
         properties: {
