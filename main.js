@@ -4,6 +4,7 @@ const { app, BrowserWindow, ipcMain, dialog, nativeImage, shell, safeStorage } =
 const path = require('path');
 const fs = require('fs');
 const https = require('https');
+const crypto = require('crypto');
 
 const OllamaClient = require('./src/ollama/client');
 const DeepSeekClient = require('./src/deepseek/client');
@@ -47,39 +48,105 @@ const CONFIRM_COMMAND_TIMEOUT_MS = 2 * 60 * 1000; // fail safe (deny) if nobody 
 // ─── Settings ────────────────────────────────────────────────────────────────
 const SETTINGS_FILE = path.join(app.getPath('userData'), 'kode-settings.json');
 
-// These hold API keys, so they're encrypted at rest via Electron's safeStorage
-// (OS keychain on macOS, libsecret/kwallet on Linux, DPAPI on Windows) rather than
-// written to disk as plaintext JSON.
+// These hold API keys, so they're encrypted at rest rather than written to disk
+// as plaintext JSON.
+//
+// This used to go through Electron's safeStorage (OS keychain on macOS, libsecret/
+// kwallet on Linux, DPAPI on Windows), which scopes its encryption key to the OS's
+// trust in the app's code signature. Kode isn't code-signed (no paid Apple
+// Developer ID — see README), so on macOS specifically there's no stable signed
+// identity for Keychain to scope that trust to: it would silently refuse to
+// release a previously-stored key back to the (unsigned/ad-hoc-signed) app on a
+// later launch, decryptString() would throw, and the code below would catch that
+// and return '' — which is exactly the "API key has to be re-entered every time
+// Kode restarts" bug this replaces. safeStorage still works fine for a properly
+// signed/notarized build, but Kode doesn't ship as one right now.
+//
+// Instead, generate our own local encryption key once and keep it in userData
+// (see KEY_FILE below). This still keeps keys out of plain sight in
+// kode-settings.json, but persistence now only depends on that key file still
+// being on disk — not on macOS's opinion of a code signature Kode doesn't have.
 const SECRET_FIELDS = ['deepseekApiKey', 'openaiApiKey', 'anthropicApiKey', 'openrouterApiKey', 'customApiKey'];
+const KEY_FILE = path.join(app.getPath('userData'), '.kode-key');
+
+let _cachedLocalKey = null;
+
+/** Loads the local AES key from disk, generating and persisting one on first use. */
+function getOrCreateLocalKey() {
+  if (_cachedLocalKey) return _cachedLocalKey;
+  try {
+    if (fs.existsSync(KEY_FILE)) {
+      const key = fs.readFileSync(KEY_FILE);
+      if (key.length === 32) {
+        _cachedLocalKey = key;
+        return key;
+      }
+    }
+  } catch (err) {
+    console.warn('[Settings] Could not read local encryption key, generating a new one:', err.message);
+  }
+  const key = crypto.randomBytes(32);
+  try {
+    fs.writeFileSync(KEY_FILE, key, { mode: 0o600 });
+  } catch (err) {
+    // Not fatal — encryptSecret/decryptSecret below still work within this run
+    // (the key is cached in memory), it just won't survive a restart, which
+    // degrades to roughly the old safeStorage failure mode rather than crashing.
+    console.warn('[Settings] Could not persist local encryption key:', err.message);
+  }
+  _cachedLocalKey = key;
+  return key;
+}
 
 /**
- * Encrypts a secret for on-disk storage. Falls back to storing it in plaintext
- * (matching the app's previous behavior) if safeStorage's OS-level backend isn't
- * available — e.g. some minimal Linux setups without a keyring daemon — rather than
- * failing to save the key at all.
+ * Encrypts a secret for on-disk storage using a locally-generated AES-256-GCM key
+ * (see KEY_FILE above). Falls back to storing it in plaintext if that ever throws,
+ * rather than failing to save the key at all.
  */
 function encryptSecret(value) {
   if (!value) return '';
   try {
-    if (safeStorage.isEncryptionAvailable()) {
-      return { __enc: true, data: safeStorage.encryptString(value).toString('base64') };
-    }
-    console.warn('[Settings] OS-level encryption is not available on this system — API key will be stored in plaintext.');
+    const key = getOrCreateLocalKey();
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+    const data = Buffer.concat([cipher.update(value, 'utf-8'), cipher.final()]);
+    return {
+      __enc2: true,
+      iv: iv.toString('base64'),
+      data: data.toString('base64'),
+      tag: cipher.getAuthTag().toString('base64'),
+    };
   } catch (err) {
     console.warn('[Settings] Encryption failed, storing key in plaintext:', err.message);
+    return value;
   }
-  return value;
 }
 
-/** Reverses encryptSecret(); also transparently accepts old plaintext-format settings files. */
+/** Reverses encryptSecret(); also transparently accepts old plaintext- and safeStorage-format settings files. */
 function decryptSecret(stored) {
   if (!stored) return '';
   if (typeof stored === 'string') return stored; // legacy plaintext, or the plaintext fallback above
-  if (stored && stored.__enc && stored.data) {
+  if (stored.__enc2 && stored.data && stored.iv && stored.tag) {
+    try {
+      const key = getOrCreateLocalKey();
+      const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(stored.iv, 'base64'));
+      decipher.setAuthTag(Buffer.from(stored.tag, 'base64'));
+      const data = Buffer.concat([decipher.update(Buffer.from(stored.data, 'base64')), decipher.final()]);
+      return data.toString('utf-8');
+    } catch (err) {
+      console.warn('[Settings] Failed to decrypt a stored API key (may need to be re-entered):', err.message);
+      return '';
+    }
+  }
+  // Legacy entry from before this fix, encrypted via safeStorage — try once to
+  // read it back (works if the OS keychain still trusts this launch); if not,
+  // this is exactly the bug being fixed here, so it only affects keys saved
+  // before the update. Re-saving it goes through the new scheme above.
+  if (stored.__enc && stored.data) {
     try {
       return safeStorage.decryptString(Buffer.from(stored.data, 'base64'));
     } catch (err) {
-      console.warn('[Settings] Failed to decrypt a stored API key (may need to be re-entered):', err.message);
+      console.warn('[Settings] Failed to decrypt a legacy stored API key — re-enter it once to fix this permanently:', err.message);
       return '';
     }
   }
