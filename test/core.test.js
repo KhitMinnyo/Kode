@@ -323,6 +323,72 @@ test('_buildContextMessages does not create a scratch file for a small drop not 
   assert.ok(!fs.existsSync(path.join(dir, '.kode', 'scratch')), 'expected no scratch file for a small drop');
 });
 
+test('_buildContextMessages persists a generated summary to .kode/context-cache.json, and a fresh AgentCore instance reuses it instead of re-summarizing', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const contextCache = require('../src/agent/contextCache');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kode-test-'));
+
+  const mockClient1 = {
+    getContextSize: async () => 2048,
+    abort() {},
+    chat: async () => ({ text: 'DISTINCTIVE-SUMMARY-abc123: user is refactoring the auth module.', toolCalls: [] }),
+  };
+  const core1 = new AgentCore(mockClient1, 2048);
+  const systemMessage = { role: 'system', content: 'sys' };
+  const history = [];
+  for (let i = 0; i < 20; i++) {
+    history.push({ role: i % 2 === 0 ? 'user' : 'assistant', content: 'Tool results:\n[Tool Result: read_file]\n' + 'x'.repeat(300) });
+  }
+
+  const messages1 = await core1._buildContextMessages(systemMessage, history, 2048, 'model-a', dir);
+  const summaryMsg1 = messages1.find(m => m.role === 'system' && m !== systemMessage);
+  assert.ok(summaryMsg1, 'expected a summary message to be injected');
+  assert.match(summaryMsg1.content, /DISTINCTIVE-SUMMARY-abc123/);
+
+  // It should have been persisted to disk under this conversation's fingerprint.
+  const fingerprint = core1._conversationFingerprint('model-a', history);
+  const onDisk = contextCache.getEntry(dir, fingerprint);
+  assert.ok(onDisk, 'expected the summary to be persisted to .kode/context-cache.json');
+  assert.match(onDisk.summary, /DISTINCTIVE-SUMMARY-abc123/);
+
+  // A brand-new AgentCore instance (simulating an app restart, or a fresh tab picking
+  // up the same conversation) has an empty in-memory cache — if it had to regenerate
+  // the summary it would call chat() again, which this mock makes throw. Getting the
+  // ORIGINAL summary text back proves it was read from disk instead.
+  const mockClient2 = {
+    getContextSize: async () => 2048,
+    abort() {},
+    chat: async () => { throw new Error('should not be called — must reuse the on-disk cache'); },
+  };
+  const core2 = new AgentCore(mockClient2, 2048);
+  const messages2 = await core2._buildContextMessages(systemMessage, history, 2048, 'model-a', dir);
+  const summaryMsg2 = messages2.find(m => m.role === 'system' && m !== systemMessage);
+  assert.ok(summaryMsg2, 'expected the fresh instance to still inject a summary message');
+  assert.match(summaryMsg2.content, /DISTINCTIVE-SUMMARY-abc123/, 'expected the fresh instance to reuse the cached summary rather than fail or fall back');
+});
+
+test('_buildContextMessages still generates a summary normally when no project folder is active (the on-disk cache is simply skipped)', async () => {
+  const mockClient = {
+    getContextSize: async () => 2048,
+    abort() {},
+    chat: async () => ({ text: 'a summary with no project folder involved', toolCalls: [] }),
+  };
+  const core = new AgentCore(mockClient, 2048);
+  const systemMessage = { role: 'system', content: 'sys' };
+  const history = [];
+  for (let i = 0; i < 20; i++) {
+    history.push({ role: i % 2 === 0 ? 'user' : 'assistant', content: 'Tool results:\n[Tool Result: read_file]\n' + 'x'.repeat(300) });
+  }
+
+  // No projectFolder argument at all.
+  const messages = await core._buildContextMessages(systemMessage, history, 2048, 'model-a');
+  const summaryMsg = messages.find(m => m.role === 'system' && m !== systemMessage);
+  assert.ok(summaryMsg, 'expected a summary message to still be injected without a project folder');
+  assert.match(summaryMsg.content, /a summary with no project folder involved/);
+});
+
 test('countToolBlockAttempts counts ```tool blocks regardless of whether the JSON parses', () => {
   assert.equal(countToolBlockAttempts('no blocks here'), 0);
   assert.equal(countToolBlockAttempts('```tool\n{"tool": "read_file", "params": {}}\n```'), 1);

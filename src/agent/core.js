@@ -3,6 +3,7 @@
 const { getSystemPrompt, getAvailableToolNames, supportsNativeToolCalling } = require('./prompts');
 const tools = require('./tools');
 const memory = require('./memory');
+const contextCache = require('./contextCache');
 const { TOOL_SCHEMAS } = tools;
 
 // Allow multi-step task execution. Bumped from 15: with write_plan encouraging explicit
@@ -429,7 +430,17 @@ ${newlyDroppedText}`;
     // lose track of what already happened once history no longer fits the budget.
     if (droppedCount > 0) {
       const fingerprint = this._conversationFingerprint(model, conversationHistory);
-      const cache = this._contextSummaryCache[fingerprint];
+      let cache = this._contextSummaryCache[fingerprint];
+      if (!cache && projectFolder) {
+        // In-memory cache misses on every fresh AgentCore instance (app restart, or a
+        // new tab picking up an existing conversation) — check the on-disk cache
+        // before paying for another LLM summarization call.
+        const diskEntry = contextCache.getEntry(projectFolder, fingerprint);
+        if (diskEntry) {
+          cache = diskEntry;
+          this._contextSummaryCache[fingerprint] = diskEntry; // warm it for next time
+        }
+      }
       // cache.scratchNote is stored separately from cache.summary (rather than baked
       // into it) so the rolling summary passed back into _summarizeDroppedHistory as
       // "previous summary" on the NEXT drop stays clean LLM-generated prose, while the
@@ -451,7 +462,9 @@ ${newlyDroppedText}`;
           const generated = await this._summarizeDroppedHistory(model, cache ? cache.summary : null, newlyDroppedText);
           if (generated) {
             summaryText = generated + scratchNote;
-            this._contextSummaryCache[fingerprint] = { droppedCount, summary: generated, scratchNote };
+            const entry = { droppedCount, summary: generated, scratchNote };
+            this._contextSummaryCache[fingerprint] = entry;
+            if (projectFolder) contextCache.setEntry(projectFolder, fingerprint, entry);
           }
         }
       }
