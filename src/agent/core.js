@@ -744,7 +744,16 @@ ${newlyDroppedText}`;
           // word alone. A simple direct answer with NO tool calls at all this turn
           // (allToolResults.length === 0 — ordinary Q&A, nothing to "finish") is exempt,
           // so this never forces tool use onto a plain conversational reply.
-          const hasDoneMarker = /✅/.test(currentResponse);
+          //
+          // This specifically matches "✅ Done" (the exact marker asked for above and in
+          // the system prompt), not just any checkmark. A bare /✅/ test used to also match
+          // an interim progress line like "✅ Fixed the CSS bug, checking the next one" —
+          // the model's own habit of using ✅ to mark a completed SUB-step, not the whole
+          // task — which counted as "done" and let the turn end silently mid-task even
+          // though nothing was actually blocking it. That's the intermittent "stops before
+          // the plan is finished" bug: it only happened on turns where the model's last
+          // message happened to contain a checkmark for some other reason.
+          const hasDoneMarker = /✅\s*done\b/i.test(currentResponse);
           if (allToolResults.length > 0 && !hasDoneMarker && consecutiveStalls < MAX_STALL_NUDGES) {
             consecutiveStalls++;
             console.warn(`[AgentCore] Stopped without a "✅ Done" marker after doing tool work (stall ${consecutiveStalls}/${MAX_STALL_NUDGES}) — nudging to continue or confirm.`);
