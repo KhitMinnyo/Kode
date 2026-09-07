@@ -142,20 +142,23 @@ async function create_file(params, projectFolder) {
  * Tool: firecrawl_scrape
  * Extracts clean Markdown text from a URL via the Firecrawl API. Used for reading
  * documentation, CVE writeups, or JS-rendered pages that http_request can't parse well.
- * Requires a FIRECRAWL_API_KEY environment variable — without it, Firecrawl's API will
- * reject the request, so we fail fast with a clear message instead of a silent 401.
+ * Requires a Firecrawl API key — set via Settings → Firecrawl API Key (threaded in as
+ * toolContext.firecrawlApiKey) or, for CLI/dev use, a FIRECRAWL_API_KEY environment
+ * variable (checked as a fallback so existing env-var setups keep working). Without
+ * either, Firecrawl's API would reject the request, so we fail fast with a clear
+ * message instead of a silent 401.
  */
-async function firecrawl_scrape(params, projectFolder) {
+async function firecrawl_scrape(params, projectFolder, toolContext = {}) {
   const url = (params && (params.url || params)) || '';
 
   if (!url || typeof url !== 'string') {
     return '❌ Error: "url" parameter is required.';
   }
 
-  const apiKey = process.env.FIRECRAWL_API_KEY;
+  const apiKey = (toolContext && toolContext.firecrawlApiKey) || process.env.FIRECRAWL_API_KEY;
   if (!apiKey) {
-    return '❌ Error: firecrawl_scrape requires a FIRECRAWL_API_KEY environment variable to be set. ' +
-      'Use http_request instead if you just need raw HTML/API data.';
+    return '❌ Error: firecrawl_scrape requires a Firecrawl API key. Add one in Settings → Firecrawl API Key, ' +
+      'or set a FIRECRAWL_API_KEY environment variable. Use http_request instead if you just need raw HTML/API data.';
   }
 
   console.log(`[+] Agent is scraping via Firecrawl: ${url}`);
@@ -197,23 +200,25 @@ async function firecrawl_scrape(params, projectFolder) {
 
 /**
  * Tool: web_search
- * Searches the web via the Brave Search API. Requires a BRAVE_SEARCH_API_KEY
- * environment variable (free tier available at brave.com/search/api). This is how
+ * Searches the web via the Brave Search API. Requires a Brave Search API key (free
+ * tier available at brave.com/search/api) — set via Settings → Brave Search API Key
+ * (threaded in as toolContext.braveSearchApiKey) or, for CLI/dev use, a
+ * BRAVE_SEARCH_API_KEY environment variable (checked as a fallback). This is how
  * local Ollama models — which have no built-in web access and a training cutoff —
  * can look up current information; pair it with firecrawl_scrape to read the most
  * relevant result in full, and save_memory to keep what was learned for next time.
  */
-async function web_search(params) {
+async function web_search(params, projectFolder, toolContext = {}) {
   const query = params && params.query;
 
   if (!query || typeof query !== 'string') {
     return '❌ Error: "query" parameter is required.';
   }
 
-  const apiKey = process.env.BRAVE_SEARCH_API_KEY;
+  const apiKey = (toolContext && toolContext.braveSearchApiKey) || process.env.BRAVE_SEARCH_API_KEY;
   if (!apiKey) {
-    return '❌ Error: web_search requires a BRAVE_SEARCH_API_KEY environment variable to be set. ' +
-      'Get a free key at https://brave.com/search/api/.';
+    return '❌ Error: web_search requires a Brave Search API key. Add one in Settings → Brave Search API Key, ' +
+      'or set a BRAVE_SEARCH_API_KEY environment variable. Get a free key at https://brave.com/search/api/.';
   }
 
   try {
@@ -1837,7 +1842,7 @@ const TOOL_SCHEMAS = [
     type: 'function',
     function: {
       name: 'firecrawl_scrape',
-      description: 'Extract clean Markdown text from a URL (documentation, CVE pages, JS-rendered sites). Requires FIRECRAWL_API_KEY to be configured.',
+      description: 'Extract clean Markdown text from a URL (documentation, CVE pages, JS-rendered sites). Requires a Firecrawl API key — set it in Settings, or via a FIRECRAWL_API_KEY environment variable.',
       parameters: {
         type: 'object',
         properties: {
@@ -1851,7 +1856,7 @@ const TOOL_SCHEMAS = [
     type: 'function',
     function: {
       name: 'web_search',
-      description: 'Search the web via Brave Search for current information not available locally or in training data. Requires BRAVE_SEARCH_API_KEY. Follow up with firecrawl_scrape to read a full page, and save_memory to keep useful findings.',
+      description: 'Search the web via Brave Search for current information not available locally or in training data. Requires a Brave Search API key — set it in Settings, or via a BRAVE_SEARCH_API_KEY environment variable. Follow up with firecrawl_scrape to read a full page, and save_memory to keep useful findings.',
       parameters: {
         type: 'object',
         properties: {

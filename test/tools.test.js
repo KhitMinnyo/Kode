@@ -377,9 +377,48 @@ test('firecrawl_scrape fails clearly without an API key configured', async () =>
   delete process.env.FIRECRAWL_API_KEY;
   try {
     const result = await tools.firecrawl_scrape({ url: 'https://example.com' });
-    assert.match(result, /FIRECRAWL_API_KEY/);
+    assert.match(result, /Firecrawl API key/);
   } finally {
     if (original !== undefined) process.env.FIRECRAWL_API_KEY = original;
+  }
+});
+
+test('firecrawl_scrape uses toolContext.firecrawlApiKey (Settings-configured) even with no env var set', async () => {
+  const original = process.env.FIRECRAWL_API_KEY;
+  delete process.env.FIRECRAWL_API_KEY;
+  const originalFetch = global.fetch;
+  let seenAuth = null;
+  global.fetch = async (url, options) => {
+    seenAuth = options && options.headers && options.headers.Authorization;
+    return { json: async () => ({ success: true, data: { markdown: 'hello from firecrawl' } }) };
+  };
+  try {
+    const result = await tools.firecrawl_scrape({ url: 'https://example.com' }, null, { firecrawlApiKey: 'settings-key-123' });
+    assert.equal(seenAuth, 'Bearer settings-key-123');
+    assert.match(result, /hello from firecrawl/);
+  } finally {
+    global.fetch = originalFetch;
+    if (original !== undefined) process.env.FIRECRAWL_API_KEY = original;
+  }
+});
+
+test('firecrawl_scrape falls back to the FIRECRAWL_API_KEY env var when toolContext has no key', async () => {
+  const original = process.env.FIRECRAWL_API_KEY;
+  process.env.FIRECRAWL_API_KEY = 'env-key-456';
+  const originalFetch = global.fetch;
+  let seenAuth = null;
+  global.fetch = async (url, options) => {
+    seenAuth = options && options.headers && options.headers.Authorization;
+    return { json: async () => ({ success: true, data: { markdown: 'from env key' } }) };
+  };
+  try {
+    const result = await tools.firecrawl_scrape({ url: 'https://example.com' }, null, {});
+    assert.equal(seenAuth, 'Bearer env-key-456');
+    assert.match(result, /from env key/);
+  } finally {
+    global.fetch = originalFetch;
+    if (original !== undefined) process.env.FIRECRAWL_API_KEY = original;
+    else delete process.env.FIRECRAWL_API_KEY;
   }
 });
 
@@ -571,9 +610,47 @@ test('web_search fails clearly without an API key configured', async () => {
   delete process.env.BRAVE_SEARCH_API_KEY;
   try {
     const result = await tools.web_search({ query: 'test query' });
-    assert.match(result, /BRAVE_SEARCH_API_KEY/);
+    assert.match(result, /Brave Search API key/);
   } finally {
     if (original !== undefined) process.env.BRAVE_SEARCH_API_KEY = original;
+  }
+});
+
+test('web_search uses toolContext.braveSearchApiKey (Settings-configured) even with no env var set', async () => {
+  const original = process.env.BRAVE_SEARCH_API_KEY;
+  delete process.env.BRAVE_SEARCH_API_KEY;
+  const originalFetch = global.fetch;
+  let seenToken = null;
+  global.fetch = async (url, options) => {
+    seenToken = options && options.headers && options.headers['X-Subscription-Token'];
+    return { ok: true, json: async () => ({ web: { results: [{ title: 'Result', url: 'https://x.test', description: 'desc' }] } }) };
+  };
+  try {
+    const result = await tools.web_search({ query: 'test query' }, null, { braveSearchApiKey: 'settings-brave-key' });
+    assert.equal(seenToken, 'settings-brave-key');
+    assert.match(result, /Result/);
+  } finally {
+    global.fetch = originalFetch;
+    if (original !== undefined) process.env.BRAVE_SEARCH_API_KEY = original;
+  }
+});
+
+test('web_search falls back to the BRAVE_SEARCH_API_KEY env var when toolContext has no key', async () => {
+  const original = process.env.BRAVE_SEARCH_API_KEY;
+  process.env.BRAVE_SEARCH_API_KEY = 'env-brave-key';
+  const originalFetch = global.fetch;
+  let seenToken = null;
+  global.fetch = async (url, options) => {
+    seenToken = options && options.headers && options.headers['X-Subscription-Token'];
+    return { ok: true, json: async () => ({ web: { results: [] } }) };
+  };
+  try {
+    await tools.web_search({ query: 'test query' }, null, {});
+    assert.equal(seenToken, 'env-brave-key');
+  } finally {
+    global.fetch = originalFetch;
+    if (original !== undefined) process.env.BRAVE_SEARCH_API_KEY = original;
+    else delete process.env.BRAVE_SEARCH_API_KEY;
   }
 });
 

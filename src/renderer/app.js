@@ -2404,6 +2404,8 @@
     setupKeyVisibilityToggle('toggle-anthropic-key-vis', 'anthropic-key');
     setupKeyVisibilityToggle('toggle-openrouter-key-vis', 'openrouter-key');
     setupKeyVisibilityToggle('toggle-custom-key-vis', 'custom-key');
+    setupKeyVisibilityToggle('toggle-firecrawl-key-vis', 'firecrawl-key');
+    setupKeyVisibilityToggle('toggle-brave-key-vis', 'brave-key');
   }
 
   function setupKeyVisibilityToggle(toggleId, inputId) {
@@ -2440,6 +2442,8 @@
       const customContextInput = document.getElementById('custom-context-size');
       const contextInput = document.getElementById('max-context-tokens');
       const confirmRiskyInput = document.getElementById('confirm-risky-commands');
+      const firecrawlKeyInput = document.getElementById('firecrawl-key');
+      const braveKeyInput = document.getElementById('brave-key');
 
       if (hostInput) hostInput.value = settings.ollamaHost || 'localhost';
       if (portInput) portInput.value = settings.ollamaPort || 11434;
@@ -2452,6 +2456,8 @@
       if (customContextInput) customContextInput.value = String(settings.customContextSize || 32768);
       if (contextInput) contextInput.value = String(settings.maxContextTokens || 16384);
       if (confirmRiskyInput) confirmRiskyInput.checked = settings.confirmRiskyCommands !== false;
+      if (firecrawlKeyInput) firecrawlKeyInput.value = settings.firecrawlApiKey || '';
+      if (braveKeyInput) braveKeyInput.value = settings.braveSearchApiKey || '';
 
       switchProviderTab(settings.provider || 'ollama');
     } catch (err) {
@@ -2668,6 +2674,8 @@
     const customContextSize = parseInt(document.getElementById('custom-context-size')?.value, 10) || 32768;
     const maxContextTokens = parseInt(document.getElementById('max-context-tokens')?.value, 10) || 16384;
     const confirmRiskyCommands = document.getElementById('confirm-risky-commands')?.checked !== false;
+    const firecrawlApiKey = document.getElementById('firecrawl-key')?.value?.trim() || '';
+    const braveSearchApiKey = document.getElementById('brave-key')?.value?.trim() || '';
 
     try {
       const result = await window.kode.saveSettings({
@@ -2683,6 +2691,8 @@
         customContextSize,
         maxContextTokens,
         confirmRiskyCommands,
+        firecrawlApiKey,
+        braveSearchApiKey,
       });
 
       if (result.success) {

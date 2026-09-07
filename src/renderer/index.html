@@ -303,6 +303,33 @@
           </div>
         </div>
 
+        <!-- Web Tools (Firecrawl + Brave Search) — independent of the AI provider tab
+             above; these power the firecrawl_scrape/web_search tools so the agent can
+             read live pages and search the web even with a local/offline model. Keys
+             are optional — the tools just report they're unavailable until one is set. -->
+        <div class="settings-group">
+          <div class="settings-group-title">
+            <span class="group-icon">🌐</span>
+            Web Tools
+          </div>
+          <div class="settings-field">
+            <label for="firecrawl-key">Firecrawl API Key (optional)</label>
+            <div class="api-key-wrapper">
+              <input type="password" id="firecrawl-key" placeholder="fc-..." />
+              <button class="api-key-toggle" id="toggle-firecrawl-key-vis" title="Toggle visibility">👁</button>
+            </div>
+            <span class="field-hint">🔗 Get a free key at <strong>firecrawl.dev</strong> — lets the agent read documentation pages, CVE writeups, and JS-rendered sites as clean Markdown (firecrawl_scrape tool).</span>
+          </div>
+          <div class="settings-field">
+            <label for="brave-key">Brave Search API Key (optional)</label>
+            <div class="api-key-wrapper">
+              <input type="password" id="brave-key" placeholder="BSA..." />
+              <button class="api-key-toggle" id="toggle-brave-key-vis" title="Toggle visibility">👁</button>
+            </div>
+            <span class="field-hint">🔗 Get a free key at <strong>brave.com/search/api</strong> — lets the agent search the live web (web_search tool), especially useful for local models with no built-in browsing and a training cutoff.</span>
+          </div>
+        </div>
+
         <!-- Ollama Config -->
         <div class="provider-config active" id="config-ollama">
           <div class="settings-group">

@@ -320,6 +320,68 @@ test('processMessage reports ask_user as unavailable (not a hang) when onAskUser
   assert.match(askResult.result, /unavailable/i);
 });
 
+test('setToolApiKeys sets firecrawlApiKey/braveSearchApiKey, defaulting to empty strings', () => {
+  const mockClient = { getContextSize: async () => 8192 };
+  const core = new AgentCore(mockClient, 8192, 'ollama');
+
+  // Defaults before any configuration — always defined so toolContext never carries undefined.
+  assert.equal(core.firecrawlApiKey, '');
+  assert.equal(core.braveSearchApiKey, '');
+
+  core.setToolApiKeys({ firecrawlApiKey: 'fc-abc', braveSearchApiKey: 'brave-xyz' });
+  assert.equal(core.firecrawlApiKey, 'fc-abc');
+  assert.equal(core.braveSearchApiKey, 'brave-xyz');
+
+  // Partial update — only the given key changes, the other is left as-is.
+  core.setToolApiKeys({ firecrawlApiKey: 'fc-updated' });
+  assert.equal(core.firecrawlApiKey, 'fc-updated');
+  assert.equal(core.braveSearchApiKey, 'brave-xyz');
+
+  // A non-string/missing field is ignored rather than overwriting with garbage.
+  core.setToolApiKeys({});
+  assert.equal(core.firecrawlApiKey, 'fc-updated');
+});
+
+test('processMessage threads setToolApiKeys-configured keys into the web_search tool via toolContext (not env vars)', async () => {
+  const originalFetch = global.fetch;
+  const originalEnvKey = process.env.BRAVE_SEARCH_API_KEY;
+  delete process.env.BRAVE_SEARCH_API_KEY; // prove the key came from Settings, not the environment
+
+  let seenToken = null;
+  global.fetch = async (url, options) => {
+    seenToken = options && options.headers && options.headers['X-Subscription-Token'];
+    return { ok: true, json: async () => ({ web: { results: [{ title: 'Result', url: 'https://x.test', description: 'desc' }] } }) };
+  };
+
+  let chatCallCount = 0;
+  const mockClient = {
+    getContextSize: async () => 8192,
+    abort() {},
+    chat: async () => {
+      chatCallCount++;
+      if (chatCallCount === 1) {
+        return { text: '```tool\n{"tool": "web_search", "params": {"query": "latest CVE"}}\n```', toolCalls: [] };
+      }
+      return { text: '✅ Done searching.', toolCalls: [] };
+    },
+  };
+
+  try {
+    const core = new AgentCore(mockClient, 8192, 'ollama');
+    core.setToolApiKeys({ braveSearchApiKey: 'settings-configured-brave-key' });
+
+    const result = await core.processMessage('search for the latest CVE', 'test-model', [], () => {}, () => {}, null, () => {});
+
+    assert.equal(seenToken, 'settings-configured-brave-key');
+    const searchResult = result.toolResults.find(t => t.tool === 'web_search');
+    assert.ok(searchResult, 'expected a web_search tool result');
+    assert.match(searchResult.result, /Result/);
+  } finally {
+    global.fetch = originalFetch;
+    if (originalEnvKey !== undefined) process.env.BRAVE_SEARCH_API_KEY = originalEnvKey;
+  }
+});
+
 test('_buildContextMessages falls back to a tool-name note when summarization fails', async () => {
   const mockClient = {
     getContextSize: async () => 2048,

@@ -161,8 +161,8 @@ already asked for the whole task; don't hand it back to them half-finished.
 - **http_request** — url, method, headers, body (HTTP requests, API testing)
 - **search_files** — pattern, path, file_pattern (grep-like search)
 - **security_audit** — path (regex pre-scan for hardcoded secrets, eval/exec sinks, SQL string-concat, weak crypto, JWT misconfig — file:line-cited candidates, not confirmed vulnerabilities)
-- **firecrawl_scrape** — url (clean Markdown extraction from docs/CVE pages/JS-heavy sites; requires FIRECRAWL_API_KEY)
-- **web_search** — query (search the live web via Brave Search; requires BRAVE_SEARCH_API_KEY)
+- **firecrawl_scrape** — url (clean Markdown extraction from docs/CVE pages/JS-heavy sites; requires a Firecrawl API key, set in Settings or FIRECRAWL_API_KEY)
+- **web_search** — query (search the live web via Brave Search; requires a Brave Search API key, set in Settings or BRAVE_SEARCH_API_KEY)
 - **save_memory** — key, value, tags (persist a durable fact for THIS project — survives restarts and new chats)
 - **recall_memory** — query (search previously-saved facts for this project by meaning, not just exact keywords, when embeddings are available; leave query empty to list recent ones)
 - **git_status** — (no params) show branch + changed files

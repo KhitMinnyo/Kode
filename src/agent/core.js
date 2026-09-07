@@ -246,6 +246,26 @@ class AgentCore {
     // 'openai' | 'anthropic'. Despite the property name (kept for backward
     // compatibility), it holds whichever client main.js's getActiveClient() selected.
     this.provider = provider;
+    // API keys for the two tools that call third-party services directly
+    // (firecrawl_scrape, web_search) rather than through the active LLM provider —
+    // set from Settings via setToolApiKeys(), independent of provider/model. Default
+    // to '' (not undefined) so toolContext always has a defined value even before
+    // main.js configures one; tools.js falls back to the matching env var when empty.
+    this.firecrawlApiKey = '';
+    this.braveSearchApiKey = '';
+  }
+
+  /**
+   * Update the API keys used by tools that call third-party services directly
+   * (firecrawl_scrape → Firecrawl, web_search → Brave Search). Call this any time
+   * main.js's Settings change, same as setMaxContextCap — unlike the LLM provider
+   * these aren't tied to which client this.ollamaClient currently points at, so they
+   * don't require recreating the AgentCore.
+   * @param {{firecrawlApiKey?: string, braveSearchApiKey?: string}} keys
+   */
+  setToolApiKeys(keys = {}) {
+    if (typeof keys.firecrawlApiKey === 'string') this.firecrawlApiKey = keys.firecrawlApiKey;
+    if (typeof keys.braveSearchApiKey === 'string') this.braveSearchApiKey = keys.braveSearchApiKey;
   }
 
   /** Update which provider `this.ollamaClient` represents — call this any time main.js swaps the active client. */
@@ -1127,13 +1147,17 @@ ${newlyDroppedText}`;
         // (index_codebase, semantic_search — embeddings only make sense against the
         // local Ollama provider, so embedClient is null for cloud providers), signal
         // (run_command/run_tests — lets Stop kill an in-flight shell command instead
-        // of only cancelling the model's own request).
+        // of only cancelling the model's own request), firecrawlApiKey/braveSearchApiKey
+        // (firecrawl_scrape/web_search — set via setToolApiKeys() from Settings; those
+        // tools fall back to FIRECRAWL_API_KEY/BRAVE_SEARCH_API_KEY env vars if empty).
         const toolContext = {
           confirmRiskyCommand: onConfirmCommand,
           askUser: onAskUser,
           ollamaClient: this.ollamaClient,
           embedClient: this.provider === 'ollama' ? this.ollamaClient : null,
           signal: this._toolAbortController.signal,
+          firecrawlApiKey: this.firecrawlApiKey,
+          braveSearchApiKey: this.braveSearchApiKey,
         };
 
         const batchResults = await this._executeToolCalls(toolCalls, projectFolder, toolContext, onStatus, onToolExecution);
