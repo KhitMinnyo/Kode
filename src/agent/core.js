@@ -345,6 +345,40 @@ ${newlyDroppedText}`;
   }
 
   /**
+   * Best-effort: saves the full (untruncated) text of conversation history messages
+   * that are about to be dropped from the live context to a scratch file, so the
+   * exact detail isn't purely lost once _summarizeDroppedHistory's LLM paraphrase (or
+   * the cheap tool-names-only fallback below) replaces it in what's actually sent to
+   * the model. A long multi-step task can drop many KB of tool output (file contents,
+   * command/scan results) as context fills up — that output already did its job
+   * informing the step it was used in, but if a LATER step needs the exact original
+   * text again (not just "ran nmap, found 3 open ports"), a summary alone can't
+   * provide that back. Only saves when there's enough content to be worth a file —
+   * most individual drops are small back-and-forth that summarizes losslessly enough
+   * on its own, and creating a scratch file for every trivial drop would just be
+   * clutter nobody reads.
+   * @returns {string} a note to append to the summary pointing at the saved file, or
+   *   '' if nothing was saved (too small, no project folder, or the write failed).
+   */
+  _cacheDroppedHistoryToScratch(projectFolder, fullText) {
+    const SCRATCH_MIN_SIZE = 1500;
+    if (!projectFolder || !fullText || fullText.length < SCRATCH_MIN_SIZE) return '';
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const dir = path.join(projectFolder, '.kode', 'scratch');
+      fs.mkdirSync(dir, { recursive: true });
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const fileName = `${stamp}-dropped-history.txt`;
+      fs.writeFileSync(path.join(dir, fileName), fullText, 'utf-8');
+      return ` (Full detail of these trimmed messages was saved to .kode/scratch/${fileName} — read_file it with offset/limit if the exact original output is needed again.)`;
+    } catch (err) {
+      console.warn('[AgentCore] Failed to cache dropped history to scratch:', err.message);
+      return '';
+    }
+  }
+
+  /**
    * Build the messages array that fits within the model's context budget.
    * Strategy:
    *   1. Always include system prompt
@@ -354,7 +388,7 @@ ${newlyDroppedText}`;
    *   5. If older messages are dropped, fold them into a running LLM-generated summary
    *      (falling back to a cheap tool-name-only note if summarization fails/times out)
    */
-  async _buildContextMessages(systemMessage, conversationHistory, contextSize, model) {
+  async _buildContextMessages(systemMessage, conversationHistory, contextSize, model, projectFolder) {
     const systemTokens = estimateTokens(systemMessage.content);
     const responseReserve = Math.floor(contextSize * 0.4);  // 40% for response
     let budget = contextSize - systemTokens - responseReserve;
@@ -396,22 +430,28 @@ ${newlyDroppedText}`;
     if (droppedCount > 0) {
       const fingerprint = this._conversationFingerprint(model, conversationHistory);
       const cache = this._contextSummaryCache[fingerprint];
-      let summaryText = cache && cache.droppedCount === droppedCount ? cache.summary : null;
+      // cache.scratchNote is stored separately from cache.summary (rather than baked
+      // into it) so the rolling summary passed back into _summarizeDroppedHistory as
+      // "previous summary" on the NEXT drop stays clean LLM-generated prose, while the
+      // scratch-file pointer still gets reapplied on every reuse of this cached entry.
+      let summaryText = cache && cache.droppedCount === droppedCount ? (cache.summary + (cache.scratchNote || '')) : null;
+      let scratchNote = '';
 
       if (!summaryText) {
         const sinceIndex = cache ? cache.droppedCount : 0;
         const newlyDropped = conversationHistory.slice(sinceIndex, droppedCount);
 
         if (newlyDropped.length > 0) {
-          const newlyDroppedText = newlyDropped
-            .map(m => `[${m.role}] ${m.content}`)
-            .join('\n')
-            .slice(-3000); // bound the summarizer's own input regardless of how much was dropped at once
+          const newlyDroppedFullText = newlyDropped.map(m => `[${m.role}] ${m.content}`).join('\n');
+          // Save the FULL text before it's lossily reduced below — see
+          // _cacheDroppedHistoryToScratch's doc comment for why.
+          scratchNote = this._cacheDroppedHistoryToScratch(projectFolder, newlyDroppedFullText);
+          const newlyDroppedText = newlyDroppedFullText.slice(-3000); // bound the summarizer's own input regardless of how much was dropped at once
 
           const generated = await this._summarizeDroppedHistory(model, cache ? cache.summary : null, newlyDroppedText);
           if (generated) {
-            summaryText = generated;
-            this._contextSummaryCache[fingerprint] = { droppedCount, summary: generated };
+            summaryText = generated + scratchNote;
+            this._contextSummaryCache[fingerprint] = { droppedCount, summary: generated, scratchNote };
           }
         }
       }
@@ -423,7 +463,9 @@ ${newlyDroppedText}`;
         });
       } else {
         // Fallback: cheap tool-name-only note, used when summarization fails, times
-        // out, or the model hasn't produced anything usable yet.
+        // out, or the model hasn't produced anything usable yet. Still gets the
+        // scratch-file pointer if one was saved above, even though the LLM summary
+        // itself didn't come through.
         const droppedMessages = conversationHistory.slice(0, droppedCount);
         const completedTools = [];
         for (const msg of droppedMessages) {
@@ -436,7 +478,7 @@ ${newlyDroppedText}`;
         }
 
         if (completedTools.length > 0) {
-          const summary = `[Context note: Earlier messages were trimmed. Previously completed: ${completedTools.join(', ')} (${completedTools.length} tool operations). Continue from where you left off.]`;
+          const summary = `[Context note: Earlier messages were trimmed. Previously completed: ${completedTools.join(', ')} (${completedTools.length} tool operations). Continue from where you left off.]${scratchNote}`;
           selectedMessages.unshift({ role: 'system', content: summary });
         }
       }
@@ -755,7 +797,7 @@ ${newlyDroppedText}`;
 
         // Smart context: detect model's max context window, build messages within budget
         const maxContextSize = await this._getContextSize(model);
-        const messages = await this._buildContextMessages(systemMessage, conversationHistory, maxContextSize, model);
+        const messages = await this._buildContextMessages(systemMessage, conversationHistory, maxContextSize, model, projectFolder);
 
         // Right-size num_ctx to what this request actually needs instead of always
         // requesting the model's full (capped) window — smaller KV cache, faster prompt

@@ -264,6 +264,65 @@ test('_buildContextMessages falls back to a tool-name note when summarization fa
   assert.match(summaryMsg.content, /Previously completed/);
 });
 
+test('_buildContextMessages caches the full text of dropped history to .kode/scratch/ when a project folder is active', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kode-test-'));
+
+  const mockClient = {
+    getContextSize: async () => 2048,
+    abort() {},
+    chat: async () => { throw new Error('model unreachable'); }, // exercise the fallback path
+  };
+  const core = new AgentCore(mockClient, 2048);
+  const systemMessage = { role: 'system', content: 'sys' };
+  const history = [];
+  for (let i = 0; i < 20; i++) {
+    history.push({ role: i % 2 === 0 ? 'user' : 'assistant', content: 'Tool results:\n[Tool Result: read_file]\n' + `unique-marker-${i}-` + 'x'.repeat(300) });
+  }
+
+  const messages = await core._buildContextMessages(systemMessage, history, 2048, 'model-a', dir);
+  const summaryMsg = messages.find(m => m.role === 'system' && m !== systemMessage);
+  assert.ok(summaryMsg, 'expected a fallback context note to be injected');
+  assert.match(summaryMsg.content, /saved to \.kode\/scratch\//);
+
+  const scratchDir = path.join(dir, '.kode', 'scratch');
+  const files = fs.readdirSync(scratchDir);
+  assert.equal(files.length, 1);
+  const saved = fs.readFileSync(path.join(scratchDir, files[0]), 'utf-8');
+  // The exact original content (not just a paraphrase) should be recoverable.
+  assert.match(saved, /unique-marker-0-/);
+});
+
+test('_buildContextMessages does not create a scratch file for a small drop not worth caching', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kode-test-'));
+
+  const mockClient = {
+    getContextSize: async () => 250,
+    abort() {},
+    chat: async () => { throw new Error('model unreachable'); },
+  };
+  const core = new AgentCore(mockClient, 250);
+  const systemMessage = { role: 'system', content: 'sys' };
+  // _buildContextMessages floors its budget at 200 tokens (~700 ASCII chars) no
+  // matter how small contextSize is, so enough short messages to exceed that (but
+  // whose oldest, dropped few stay well under the 1500-char scratch threshold) is
+  // what actually exercises "a drop happened, but it wasn't worth a scratch file" —
+  // an arbitrarily tiny contextSize alone does NOT force a drop.
+  const history = [];
+  for (let i = 0; i < 30; i++) {
+    history.push({ role: i % 2 === 0 ? 'user' : 'assistant', content: `short message number ${i}` });
+  }
+
+  const messages = await core._buildContextMessages(systemMessage, history, 250, 'model-a', dir);
+  assert.ok(messages.length < history.length + 1, 'expected this budget to actually drop something, or the test proves nothing');
+  assert.ok(!fs.existsSync(path.join(dir, '.kode', 'scratch')), 'expected no scratch file for a small drop');
+});
+
 test('countToolBlockAttempts counts ```tool blocks regardless of whether the JSON parses', () => {
   assert.equal(countToolBlockAttempts('no blocks here'), 0);
   assert.equal(countToolBlockAttempts('```tool\n{"tool": "read_file", "params": {}}\n```'), 1);
