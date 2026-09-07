@@ -750,6 +750,12 @@ async function http_request(params, projectFolder) {
  * Tool: search_files
  * Searches for patterns in project files (grep-like).
  */
+// Same directories embeddings.js's file walk already skips (see SKIP_DIRS there) —
+// search_files had no such exclusion at all, so a plain grep over a project with
+// node_modules present would burn most of its 50-line cap on dependency noise
+// before ever reaching the user's own code.
+const SEARCH_EXCLUDE_DIRS = ['node_modules', '.git', '.kode', 'dist', 'build', 'out', '__pycache__', 'venv', '.venv', 'vendor', 'target', '.next', '.cache', 'coverage'];
+
 async function search_files(params, projectFolder) {
   const { pattern, path: searchPath = '.', file_pattern = '' } = params;
 
@@ -757,10 +763,11 @@ async function search_files(params, projectFolder) {
 
   try {
     const resolvedPath = path.isAbsolute(searchPath) ? searchPath : path.resolve(projectFolder || process.cwd(), searchPath);
+    const excludeFlags = SEARCH_EXCLUDE_DIRS.map((d) => `--exclude-dir='${d}'`).join(' ');
 
-    let cmd = `grep -rn --include='*' "${pattern.replace(/"/g, '\\"')}" "${resolvedPath}" 2>/dev/null | head -50`;
+    let cmd = `grep -rn ${excludeFlags} --include='*' "${pattern.replace(/"/g, '\\"')}" "${resolvedPath}" 2>/dev/null | head -50`;
     if (file_pattern) {
-      cmd = `grep -rn --include='${file_pattern}' "${pattern.replace(/"/g, '\\"')}" "${resolvedPath}" 2>/dev/null | head -50`;
+      cmd = `grep -rn ${excludeFlags} --include='${file_pattern}' "${pattern.replace(/"/g, '\\"')}" "${resolvedPath}" 2>/dev/null | head -50`;
     }
 
     const output = execSync(cmd, { encoding: 'utf-8', timeout: 15000, shell: DEFAULT_SHELL }).trim();
