@@ -52,7 +52,17 @@ function quickSyntaxCheck(absPath) {
   const ext = path.extname(absPath).toLowerCase();
   try {
     if (['.js', '.mjs', '.cjs'].includes(ext)) {
-      execFileSync(process.execPath, ['--check', absPath], { timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'] });
+      // process.execPath inside an Electron app is the Electron binary, not plain
+      // node. Without ELECTRON_RUN_AS_NODE=1, Electron doesn't treat --check as a
+      // node flag — it treats the file being checked as the app to LAUNCH, so a
+      // "syntax check" would boot the whole Kode UI instead of parsing the file.
+      // With the env var set (harmless under plain node too), Electron runs as
+      // node and --check behaves correctly.
+      execFileSync(process.execPath, ['--check', absPath], {
+        timeout: 5000,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      });
       return { ok: true };
     }
     if (ext === '.json') {

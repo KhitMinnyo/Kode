@@ -5,6 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const https = require('https');
 const crypto = require('crypto');
+const { execFileSync } = require('child_process');
 
 const OllamaClient = require('./src/ollama/client');
 const DeepSeekClient = require('./src/deepseek/client');
@@ -1243,7 +1244,49 @@ function registerIPCHandlers() {
 
 // ─── App Lifecycle ───────────────────────────────────────────────────────────
 
+/**
+ * Resolves the user's real login-shell PATH and merges it into process.env so
+ * child processes (run_command / run_tests / quickSyntaxCheck / server spawns)
+ * can find tools like node, npm, python3, nmap, etc.
+ *
+ * Why this exists: when Kode is launched from Finder (or any GUI context), macOS
+ * gives it a minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin:...) that does NOT
+ * include what the user's shell profile (.zshrc / .zprofile / .bashrc / nvm /
+ * volta / homebrew etc.) appends — so a command that works perfectly in Terminal
+ * ("node", "npm test", "nmap") fails inside Kode with "command not found". A
+ * login shell has sourced those profiles, so asking it to echo $PATH recovers
+ * the same environment the user actually works in.
+ *
+ * Deliberately best-effort and cached (once per launch): if the login shell
+ * can't be started or times out, we keep whatever PATH we already had — degraded
+ * behavior, never a crash. The current PATH is always prepended so any dirs the
+ * app was launched with (e.g. PATH additions from `electron . --dev`) win over
+ * the shell's, matching normal shell semantics where earlier entries take
+ * precedence.
+ */
+function mergeLoginShellPathIntoEnv() {
+  try {
+    const shell = process.platform === 'darwin' ? '/bin/zsh' : '/bin/bash';
+    const shellPath = execFileSync(shell, ['-ilc', 'echo "$PATH"'], {
+      timeout: 8000,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const shellPathTrimmed = shellPath.trim().split('\n').pop() || ''; // ignore any motd/banner lines
+    if (!shellPathTrimmed) return;
+    const merged = `${process.env.PATH || ''}${process.env.PATH ? ':' : ''}${shellPathTrimmed}`;
+    // De-duplicate while preserving order — /usr/bin and /bin must stay ahead of
+    // /opt/homebrew/bin or the system's older tools would shadow homebrew's.
+    const seen = new Set();
+    const cleaned = merged.split(':').filter((p) => p && !seen.has(p) && (seen.add(p), true));
+    process.env.PATH = cleaned.join(':');
+  } catch (err) {
+    console.warn('[Main] Could not read login-shell PATH (using default):', err.message);
+  }
+}
+
 app.whenReady().then(() => {
+  mergeLoginShellPathIntoEnv();
   loadChats();
   loadProjects();
   registerIPCHandlers();
