@@ -1656,3 +1656,52 @@ Object.defineProperty(module.exports, 'quickSyntaxCheck', {
   value: quickSyntaxCheck,
   enumerable: false,
 });
+
+// Tools with no side effects — safe for AgentCore to run concurrently with each
+// other when the model requests several in the same turn (see core.js's tool-
+// execution loop, which batches consecutive calls satisfying this check via
+// Promise.all instead of awaiting them one at a time). Deliberately conservative:
+// anything that writes to disk, touches git state, runs a shell command, or could
+// otherwise race with — or needs to see the effect of — a concurrent call stays off
+// this list and runs alone, in order, same as before. Notably excludes
+// index_codebase (writes the embedding index to disk) even though semantic_search
+// (a pure read of that index) is included.
+const READ_ONLY_TOOLS = new Set([
+  'read_file',
+  'list_directory',
+  'search_files',
+  'git_status',
+  'git_diff',
+  'web_search',
+  'firecrawl_scrape',
+  'recall_memory',
+  'semantic_search',
+]);
+
+/**
+ * Whether one tool call is safe to run in parallel with other read-only calls.
+ * Name-based for everything except http_request, which is only read-only when its
+ * method is GET/HEAD — POST/PUT/DELETE/etc. are side-effecting (the whole point of
+ * the call is usually to submit something) and get treated like create_file/
+ * run_command: run alone, never batched with anything else.
+ */
+function isReadOnlyToolCall(toolName, params) {
+  if (toolName === 'http_request') {
+    const method = ((params && params.method) || 'GET').toString().toUpperCase();
+    return method === 'GET' || method === 'HEAD';
+  }
+  return READ_ONLY_TOOLS.has(toolName);
+}
+
+// Both non-enumerable for the same reason as quickSyntaxCheck above: READ_ONLY_TOOLS
+// isn't a function so Object.keys(tools).filter(typeof === 'function') already
+// ignores it, but isReadOnlyToolCall is a function and would otherwise be mistaken
+// for a 21st model-callable tool.
+Object.defineProperty(module.exports, 'READ_ONLY_TOOLS', {
+  value: READ_ONLY_TOOLS,
+  enumerable: false,
+});
+Object.defineProperty(module.exports, 'isReadOnlyToolCall', {
+  value: isReadOnlyToolCall,
+  enumerable: false,
+});

@@ -267,6 +267,39 @@ test('TOOL_SCHEMAS covers every tool name returned by the module', () => {
   assert.deepEqual(schemaNames, toolNames);
 });
 
+test('isReadOnlyToolCall classifies pure-read tools as read-only', () => {
+  for (const name of ['read_file', 'list_directory', 'search_files', 'git_status', 'git_diff', 'web_search', 'firecrawl_scrape', 'recall_memory', 'semantic_search']) {
+    assert.equal(tools.isReadOnlyToolCall(name, {}), true, `expected ${name} to be read-only`);
+  }
+});
+
+test('isReadOnlyToolCall classifies side-effecting tools as not read-only', () => {
+  for (const name of ['create_file', 'edit_file', 'apply_patch', 'run_command', 'run_tests', 'git_checkpoint', 'git_revert', 'write_plan', 'save_memory', 'index_codebase']) {
+    assert.equal(tools.isReadOnlyToolCall(name, {}), false, `expected ${name} to NOT be read-only`);
+  }
+});
+
+test('isReadOnlyToolCall treats http_request as read-only only for GET/HEAD (default GET)', () => {
+  assert.equal(tools.isReadOnlyToolCall('http_request', {}), true, 'no method specified defaults to GET');
+  assert.equal(tools.isReadOnlyToolCall('http_request', { method: 'GET' }), true);
+  assert.equal(tools.isReadOnlyToolCall('http_request', { method: 'get' }), true, 'method check should be case-insensitive');
+  assert.equal(tools.isReadOnlyToolCall('http_request', { method: 'HEAD' }), true);
+  assert.equal(tools.isReadOnlyToolCall('http_request', { method: 'POST' }), false);
+  assert.equal(tools.isReadOnlyToolCall('http_request', { method: 'PUT' }), false);
+  assert.equal(tools.isReadOnlyToolCall('http_request', { method: 'DELETE' }), false);
+});
+
+test('READ_ONLY_TOOLS and isReadOnlyToolCall are not enumerable on the tools dispatch map', () => {
+  // Guards against repeating the exact bug this pattern was written to avoid (see
+  // quickSyntaxCheck's non-enumerable export just above it in tools.js): if either of
+  // these were ever accidentally exported as a plain enumerable property, the
+  // "TOOL_SCHEMAS covers every tool name" test above would start failing since
+  // isReadOnlyToolCall is a function and would look like an unschema'd 21st tool.
+  const toolNames = Object.keys(tools).filter(k => typeof tools[k] === 'function');
+  assert.ok(!toolNames.includes('isReadOnlyToolCall'));
+  assert.ok(!Object.keys(tools).includes('READ_ONLY_TOOLS'));
+});
+
 test('save_memory requires an active project folder', async () => {
   const result = await tools.save_memory({ key: 'a', value: 'b' }, null);
   assert.match(result, /requires an active project folder/);

@@ -526,6 +526,81 @@ ${newlyDroppedText}`;
   }
 
   /**
+   * Runs one turn's tool calls, executing consecutive read-only calls (see
+   * tools.isReadOnlyToolCall) concurrently via Promise.all instead of one at a time —
+   * a model that asks to read several files, grep, and check git status in the same
+   * turn no longer pays for each one's latency serially. A batch boundary is drawn at
+   * every side-effecting call (create_file, run_command, apply_patch, etc.): those
+   * still run alone, so a write is never racing another call and anything after it
+   * can rely on having seen its effect, exactly as before this method existed.
+   *
+   * Individual tool errors are caught per-call (same as the old sequential loop) so
+   * one failing/throwing tool never takes down the rest of its batch. Results and
+   * onToolExecution callbacks are emitted in the model's original request order once
+   * each batch settles, regardless of which call in the batch actually finished
+   * first — the model still sees "[Tool Result: x]" blocks in the order it asked for
+   * them.
+   *
+   * Stop-responsiveness (`this._isGenerating`) is checked once per batch rather than
+   * once per call — a minor regression for a large all-read-only batch, but read-only
+   * tools are typically fast, and the tools that actually run long (run_command,
+   * run_tests) are side-effecting and so already run alone, one per batch, where the
+   * check still applies before each one.
+   *
+   * @returns {Promise<Array<{tool: string, params: object, result: string}>>}
+   */
+  async _executeToolCalls(toolCalls, projectFolder, toolContext, onStatus, onToolExecution) {
+    const availableTools = getAvailableToolNames();
+    const results = [];
+
+    const runOne = async (call) => {
+      let result;
+      if (!availableTools.includes(call.tool)) {
+        result = `❌ Unknown tool: "${call.tool}". Available tools: ${availableTools.join(', ')}`;
+      } else {
+        const handler = tools[call.tool];
+        try {
+          result = await handler(call.params, projectFolder, toolContext);
+        } catch (err) {
+          result = `❌ Tool execution error (${call.tool}): ${err.message}`;
+        }
+      }
+      return { tool: call.tool, params: call.params, result };
+    };
+
+    let i = 0;
+    while (i < toolCalls.length) {
+      if (!this._isGenerating) break;
+
+      // Group this call with however many immediately-following calls are also
+      // read-only, so e.g. three read_file calls in a row run concurrently. A
+      // side-effecting call never grows a batch beyond itself.
+      const batch = [toolCalls[i]];
+      if (tools.isReadOnlyToolCall(toolCalls[i].tool, toolCalls[i].params)) {
+        let j = i + 1;
+        while (j < toolCalls.length && tools.isReadOnlyToolCall(toolCalls[j].tool, toolCalls[j].params)) {
+          batch.push(toolCalls[j]);
+          j++;
+        }
+      }
+
+      onStatus(batch.length > 1
+        ? { status: 'tool', message: `Running ${batch.length} tools in parallel: ${batch.map(c => c.tool).join(', ')}...` }
+        : { status: 'tool', message: `Running ${batch[0].tool}...` });
+
+      const batchResults = await Promise.all(batch.map(runOne));
+      for (const toolExecution of batchResults) {
+        results.push(toolExecution);
+        onToolExecution(toolExecution);
+      }
+
+      i += batch.length;
+    }
+
+    return results;
+  }
+
+  /**
    * Re-verifies what this turn actually wrote to disk instead of trusting a "✅ Done"
    * claim at face value — see the call site in processMessage for why. Two checks,
    * cheapest first:
@@ -1039,7 +1114,6 @@ ${newlyDroppedText}`;
         conversationHistory.push({ role: 'assistant', content: currentResponse });
 
         // Execute each tool call
-        const availableTools = getAvailableToolNames();
         const toolResultParts = [];
         // Extra context passed as a 3rd arg to tool handlers. Most handlers ignore
         // whichever of these they don't need, so it's safe to pass all of them
@@ -1055,35 +1129,10 @@ ${newlyDroppedText}`;
           signal: this._toolAbortController.signal,
         };
 
-        for (const call of toolCalls) {
-          if (!this._isGenerating) break;
-
-          // Emit tool status
-          onStatus({ status: 'tool', message: `Running ${call.tool}...` });
-
-          let result;
-
-          if (!availableTools.includes(call.tool)) {
-            result = `❌ Unknown tool: "${call.tool}". Available tools: ${availableTools.join(', ')}`;
-          } else {
-            const handler = tools[call.tool];
-            try {
-              result = await handler(call.params, projectFolder, toolContext);
-            } catch (err) {
-              result = `❌ Tool execution error (${call.tool}): ${err.message}`;
-            }
-          }
-
-          const toolExecution = {
-            tool: call.tool,
-            params: call.params,
-            result,
-          };
-
+        const batchResults = await this._executeToolCalls(toolCalls, projectFolder, toolContext, onStatus, onToolExecution);
+        for (const toolExecution of batchResults) {
           allToolResults.push(toolExecution);
-          onToolExecution(toolExecution);
-
-          toolResultParts.push(`[Tool Result: ${call.tool}]\n${result}`);
+          toolResultParts.push(`[Tool Result: ${toolExecution.tool}]\n${toolExecution.result}`);
         }
 
         // If some (but not all) ```tool``` blocks in this response failed to parse,

@@ -389,6 +389,130 @@ test('_buildContextMessages still generates a summary normally when no project f
   assert.match(summaryMsg.content, /a summary with no project folder involved/);
 });
 
+test('_executeToolCalls runs consecutive read-only tool calls concurrently, not one at a time', async () => {
+  const toolsModule = require('../src/agent/tools');
+  const originalReadFile = toolsModule.read_file;
+  const originalListDirectory = toolsModule.list_directory;
+  const originalSearchFiles = toolsModule.search_files;
+  const DELAY_MS = 60;
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  // Three tools that would each take DELAY_MS if awaited one at a time (~3x DELAY_MS
+  // total) but should overlap almost entirely if actually run concurrently.
+  toolsModule.read_file = async () => { await sleep(DELAY_MS); return 'read_file done'; };
+  toolsModule.list_directory = async () => { await sleep(DELAY_MS); return 'list_directory done'; };
+  toolsModule.search_files = async () => { await sleep(DELAY_MS); return 'search_files done'; };
+
+  try {
+    const core = new AgentCore({ getContextSize: async () => 8192, abort() {} }, 8192);
+    core._isGenerating = true; // normally set by processMessage; calling _executeToolCalls directly here
+    const toolCalls = [
+      { tool: 'read_file', params: {} },
+      { tool: 'list_directory', params: {} },
+      { tool: 'search_files', params: {} },
+    ];
+    const start = Date.now();
+    const results = await core._executeToolCalls(toolCalls, null, {}, () => {}, () => {});
+    const elapsed = Date.now() - start;
+
+    assert.equal(results.length, 3);
+    assert.deepEqual(results.map(r => r.result), ['read_file done', 'list_directory done', 'search_files done']);
+    // Sequential execution would take roughly 3 * DELAY_MS (180ms+); concurrent
+    // execution should land close to a single DELAY_MS. Generous margin for CI jitter.
+    assert.ok(elapsed < DELAY_MS * 2, `expected concurrent execution (<${DELAY_MS * 2}ms), took ${elapsed}ms`);
+  } finally {
+    toolsModule.read_file = originalReadFile;
+    toolsModule.list_directory = originalListDirectory;
+    toolsModule.search_files = originalSearchFiles;
+  }
+});
+
+test('_executeToolCalls preserves the original request order in its results, even when a batch finishes out of order', async () => {
+  const toolsModule = require('../src/agent/tools');
+  const originalReadFile = toolsModule.read_file;
+  const originalListDirectory = toolsModule.list_directory;
+
+  // read_file (requested first) finishes LAST; list_directory (requested second)
+  // finishes FIRST — results/callbacks should still come back in request order.
+  toolsModule.read_file = async () => { await new Promise((resolve) => setTimeout(resolve, 40)); return 'slow read_file result'; };
+  toolsModule.list_directory = async () => 'fast list_directory result';
+
+  try {
+    const core = new AgentCore({ getContextSize: async () => 8192, abort() {} }, 8192);
+    core._isGenerating = true;
+    const toolCalls = [
+      { tool: 'read_file', params: {} },
+      { tool: 'list_directory', params: {} },
+    ];
+    const executedOrder = [];
+    const results = await core._executeToolCalls(toolCalls, null, {}, () => {}, (exec) => executedOrder.push(exec.tool));
+
+    assert.deepEqual(results.map(r => r.tool), ['read_file', 'list_directory']);
+    assert.deepEqual(executedOrder, ['read_file', 'list_directory'], 'onToolExecution should fire in request order too');
+  } finally {
+    toolsModule.read_file = originalReadFile;
+    toolsModule.list_directory = originalListDirectory;
+  }
+});
+
+test('_executeToolCalls never batches a side-effecting call with a read — a later read sees the write\'s effect', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kode-test-'));
+  const core = new AgentCore({ getContextSize: async () => 8192, abort() {} }, 8192);
+  core._isGenerating = true;
+  const toolCalls = [
+    { tool: 'create_file', params: { path: 'note.txt', content: 'hello from create_file' } },
+    { tool: 'read_file', params: { path: 'note.txt' } },
+  ];
+  const results = await core._executeToolCalls(toolCalls, dir, {}, () => {}, () => {});
+  assert.equal(results.length, 2);
+  assert.equal(results[0].tool, 'create_file');
+  assert.equal(results[1].tool, 'read_file');
+  assert.match(results[1].result, /hello from create_file/);
+});
+
+test('_executeToolCalls catches one failing tool without failing the rest of its batch', async () => {
+  const toolsModule = require('../src/agent/tools');
+  const originalReadFile = toolsModule.read_file;
+  toolsModule.read_file = async () => { throw new Error('boom'); };
+
+  try {
+    const fs = require('node:fs');
+    const os = require('node:os');
+    const path = require('node:path');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kode-test-'));
+    const core = new AgentCore({ getContextSize: async () => 8192, abort() {} }, 8192);
+    core._isGenerating = true;
+    const toolCalls = [
+      { tool: 'read_file', params: { path: 'nope.txt' } },
+      { tool: 'list_directory', params: { path: '.' } },
+    ];
+    const results = await core._executeToolCalls(toolCalls, dir, {}, () => {}, () => {});
+    assert.equal(results.length, 2, 'expected both calls to still produce a result');
+    assert.match(results[0].result, /Tool execution error \(read_file\): boom/);
+    assert.doesNotMatch(results[1].result, /Tool execution error/);
+  } finally {
+    toolsModule.read_file = originalReadFile;
+  }
+});
+
+test('_executeToolCalls reports an unknown tool name without throwing, same as before batching existed', async () => {
+  const core = new AgentCore({ getContextSize: async () => 8192, abort() {} }, 8192);
+  core._isGenerating = true;
+  const results = await core._executeToolCalls([{ tool: 'not_a_real_tool', params: {} }], null, {}, () => {}, () => {});
+  assert.equal(results.length, 1);
+  assert.match(results[0].result, /Unknown tool: "not_a_real_tool"/);
+});
+
+test('_executeToolCalls stops dispatching further batches once _isGenerating goes false (Stop button)', async () => {
+  const core = new AgentCore({ getContextSize: async () => 8192, abort() {} }, 8192);
+  core._isGenerating = false; // simulate Stop having already been pressed
+  const results = await core._executeToolCalls([{ tool: 'read_file', params: { path: 'x.txt' } }], null, {}, () => {}, () => {});
+  assert.deepEqual(results, []);
+});
+
 test('countToolBlockAttempts counts ```tool blocks regardless of whether the JSON parses', () => {
   assert.equal(countToolBlockAttempts('no blocks here'), 0);
   assert.equal(countToolBlockAttempts('```tool\n{"tool": "read_file", "params": {}}\n```'), 1);
