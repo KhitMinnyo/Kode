@@ -61,6 +61,48 @@ test('read_file refuses to read a directory', async () => {
   assert.match(result, /is a directory/);
 });
 
+test('read_file with offset/limit returns only the requested line range, numbered', async () => {
+  const dir = makeTempDir();
+  const lines = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`);
+  fs.writeFileSync(path.join(dir, 'many.txt'), lines.join('\n'));
+
+  const result = await tools.read_file({ path: 'many.txt', offset: 5, limit: 3 }, dir);
+  assert.match(result, /lines 5-7 of 20/);
+  assert.match(result, /5\tline 5/);
+  assert.match(result, /6\tline 6/);
+  assert.match(result, /7\tline 7/);
+  assert.doesNotMatch(result, /\bline 4\b/);
+  assert.doesNotMatch(result, /\bline 8\b/);
+  assert.match(result, /13 more line\(s\) below — pass offset: 8 to continue/);
+});
+
+test('read_file with only offset (no limit) defaults to a 2000-line window and omits the "more" hint once it reaches the end', async () => {
+  const dir = makeTempDir();
+  const lines = Array.from({ length: 10 }, (_, i) => `line ${i + 1}`);
+  fs.writeFileSync(path.join(dir, 'short.txt'), lines.join('\n'));
+
+  const result = await tools.read_file({ path: 'short.txt', offset: 3 }, dir);
+  assert.match(result, /lines 3-10 of 10/);
+  assert.match(result, /3\tline 3/);
+  assert.match(result, /10\tline 10/);
+  assert.doesNotMatch(result, /more line\(s\) below/);
+});
+
+test('read_file with an offset past the end of the file returns a clear error', async () => {
+  const dir = makeTempDir();
+  fs.writeFileSync(path.join(dir, 'small.txt'), 'a\nb\nc');
+  const result = await tools.read_file({ path: 'small.txt', offset: 50 }, dir);
+  assert.match(result, /❌.*past the end/);
+});
+
+test('read_file without offset/limit keeps the old whole-file-or-first-50KB behavior', async () => {
+  const dir = makeTempDir();
+  fs.writeFileSync(path.join(dir, 'plain.txt'), 'line 1\nline 2\nline 3');
+  const result = await tools.read_file({ path: 'plain.txt' }, dir);
+  assert.match(result, /line 1\nline 2\nline 3/); // unnumbered, full content, no range header
+  assert.doesNotMatch(result, /showing lines/);
+});
+
 test('list_directory lists files and folders', async () => {
   const dir = makeTempDir();
   fs.writeFileSync(path.join(dir, 'a.txt'), 'x');

@@ -153,7 +153,7 @@ already asked for the whole task; don't hand it back to them half-finished.
 - **run_command** — command (shell command. Security scans get 120s timeout)
 - **create_file** — path, content
 - **edit_file** — path, old_content, new_content
-- **read_file** — path
+- **read_file** — path, offset, limit (offset/limit read a specific line range — use for files bigger than 50KB, or to jump straight to a known section)
 - **list_directory** — path
 - **http_request** — url, method, headers, body (HTTP requests, API testing)
 - **search_files** — pattern, path, file_pattern (grep-like search)

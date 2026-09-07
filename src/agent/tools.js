@@ -268,10 +268,16 @@ async function edit_file(params, projectFolder) {
 
 /**
  * Tool: read_file
- * Reads and returns the contents of a file, capped at 50KB.
+ * Reads and returns the contents of a file. Whole-file reads are capped at 50KB (see
+ * MAX_FILE_READ_SIZE) — past that cap, this used to always return just the first 50KB
+ * with no way to reach the rest, which made any file larger than that effectively
+ * unreadable past its opening. offset/limit (1-indexed line numbers, mirroring how
+ * editors and grep -A/-B report matches) let the caller target a specific window of a
+ * large file instead — read the next chunk, jump to a line search_files pointed at,
+ * etc — without ever loading the parts it doesn't need.
  */
 async function read_file(params, projectFolder) {
-  const { path: filePath } = params;
+  const { path: filePath, offset, limit } = params;
 
   if (!filePath) {
     return '❌ Error: "path" parameter is required.';
@@ -290,6 +296,38 @@ async function read_file(params, projectFolder) {
       return `❌ Error: "${resolvedPath}" is a directory, not a file. Use list_directory instead.`;
     }
 
+    // A line range was explicitly requested — honor it regardless of file size, so a
+    // specific window of even a huge file is reachable on its own terms rather than
+    // always being gated behind "read (and discard) the whole 50KB-capped file first."
+    if (offset !== undefined || limit !== undefined) {
+      const startLine = Math.max(1, parseInt(offset, 10) || 1);
+      const maxLines = Math.max(1, parseInt(limit, 10) || 2000);
+
+      const allLines = fs.readFileSync(resolvedPath, 'utf-8').split('\n');
+      const totalLines = allLines.length;
+      let endLineExclusive = Math.min(totalLines, startLine - 1 + maxLines);
+      const slice = allLines.slice(startLine - 1, endLineExclusive);
+
+      if (slice.length === 0) {
+        return `❌ Error: offset ${startLine} is past the end of the file (${totalLines} lines total).`;
+      }
+
+      let text = slice.map((line, i) => `${startLine + i}\t${line}`).join('\n');
+      // Still respect the same overall size cap as a whole-file read, in case limit
+      // was set very high on a file with unusually long lines — trims from the end
+      // rather than raw-slicing the joined string, so it never cuts a line in half.
+      while (Buffer.byteLength(text, 'utf-8') > MAX_FILE_READ_SIZE && slice.length > 1) {
+        slice.pop();
+        endLineExclusive--;
+        text = slice.map((line, i) => `${startLine + i}\t${line}`).join('\n');
+      }
+
+      const more = endLineExclusive < totalLines
+        ? `\n\n(${totalLines - endLineExclusive} more line(s) below — pass offset: ${endLineExclusive + 1} to continue)`
+        : '';
+      return `📄 ${resolvedPath} (${stats.size} bytes total, showing lines ${startLine}-${endLineExclusive} of ${totalLines}):\n\n${text}${more}`;
+    }
+
     if (stats.size > MAX_FILE_READ_SIZE) {
       // Read only the first 50KB
       const fd = fs.openSync(resolvedPath, 'r');
@@ -297,7 +335,7 @@ async function read_file(params, projectFolder) {
       fs.readSync(fd, buffer, 0, MAX_FILE_READ_SIZE, 0);
       fs.closeSync(fd);
       const content = buffer.toString('utf-8');
-      return `📄 ${resolvedPath} (${stats.size} bytes, showing first 50KB):\n\n${content}\n\n⚠️ File truncated — showing first 50KB of ${stats.size} bytes.`;
+      return `📄 ${resolvedPath} (${stats.size} bytes, showing first 50KB):\n\n${content}\n\n⚠️ File truncated — showing first 50KB of ${stats.size} bytes. Pass offset/limit to read a specific range of lines instead of just the start.`;
     }
 
     const content = fs.readFileSync(resolvedPath, 'utf-8');
@@ -1288,11 +1326,13 @@ const TOOL_SCHEMAS = [
     type: 'function',
     function: {
       name: 'read_file',
-      description: 'Read and return the contents of a file (capped at 50KB).',
+      description: 'Read and return the contents of a file (capped at 50KB per call). For a file larger than that, or to jump straight to a known section, pass offset/limit to read a specific range of lines instead of just the beginning.',
       parameters: {
         type: 'object',
         properties: {
           path: { type: 'string', description: 'File path to read.' },
+          offset: { type: 'number', description: 'First line to read (1-indexed). Omit to start from the beginning.' },
+          limit: { type: 'number', description: 'Max number of lines to read from offset. Defaults to 2000.' },
         },
         required: ['path'],
       },
