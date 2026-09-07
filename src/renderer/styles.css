@@ -155,6 +155,13 @@ html, body {
   padding: 0;
   position: relative;
   z-index: 10;
+  /* Sidebar height is pinned to 100vh (see .app-container). Without this, a long
+     enough child (e.g. many project folders on a short 14" laptop screen) can
+     silently grow past the viewport and push .sidebar-bottom (Settings/New Chat)
+     out of view with no way to scroll to it. Children are bounded/scrollable
+     below (.project-section max-height, .chat-section flex:1) so this should
+     rarely engage — it's a safety net, not the primary fix. */
+  overflow: hidden;
 }
 
 /* ============================================================
@@ -456,7 +463,15 @@ body.resizing-panel {
   margin-bottom: 4px;
   display: flex;
   flex-direction: column;
-  flex: 0 0 auto;
+  /* Was "flex: 0 0 auto" with no height cap: on a short viewport (e.g. a 14"
+     Windows laptop) a long project list grew unbounded and pushed .sidebar-bottom
+     (the Settings button) below the visible area, with .sidebar having no scroll.
+     Capping the height here lets .projects-list's own overflow-y:auto take over
+     once there are more folders than fit, instead of the whole section growing
+     forever. Still allowed to shrink further (flex-shrink: 1) on very short
+     screens so it never claims more room than is actually available. */
+  flex: 0 1 auto;
+  max-height: min(30vh, 260px);
   min-height: 0;
   overflow: hidden;
 }
@@ -1091,6 +1106,9 @@ body.resizing-panel {
 /* Bottom bar */
 .sidebar-bottom {
   padding: 8px 16px;
+  /* Never sacrifice this row (it holds the Settings button) to make room for a
+     long project or chat list — those sections are the ones that scroll/shrink. */
+  flex-shrink: 0;
 }
 
 /* ----- Connection Status ----- */
