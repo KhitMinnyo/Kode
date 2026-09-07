@@ -453,3 +453,153 @@ test('processMessage does not add a safety-limit message when the task finishes 
   assert.doesNotMatch(result.response, /safety limit/i);
   assert.match(result.response, /✅ Done/);
 });
+
+// ─── Post-"✅ Done" verification (_verifyDoneClaim) ──────────────────────────
+
+test('processMessage nudges when a syntax check on a just-written file fails after "✅ Done", then accepts once fixed', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kode-test-'));
+
+  let chatCallCount = 0;
+  const mockClient = {
+    getContextSize: async () => 8192,
+    abort() {},
+    chat: async (model, messages) => {
+      if (messages.length === 1 && messages[0].role === 'user') {
+        return { text: 'summary', toolCalls: [] }; // context-summarization call, ignore
+      }
+      chatCallCount++;
+      if (chatCallCount === 1) {
+        // Write a JS file with a real syntax error (unbalanced brace).
+        return {
+          text: '```tool\n{"tool": "create_file", "params": {"path": "broken.js", "content": "function broken( {"}}\n```',
+          toolCalls: [],
+        };
+      }
+      if (chatCallCount === 2) {
+        // Claims done without actually fixing anything.
+        return { text: '✅ Done: wrote broken.js.', toolCalls: [] };
+      }
+      if (chatCallCount === 3) {
+        // Responds to the nudge by fixing the file.
+        return {
+          text: '```tool\n{"tool": "create_file", "params": {"path": "broken.js", "content": "function fixed() {}\\n"}}\n```',
+          toolCalls: [],
+        };
+      }
+      return { text: '✅ Done: fixed the syntax error.', toolCalls: [] };
+    },
+  };
+
+  const core = new AgentCore(mockClient, 8192, 'ollama');
+  const result = await core.processMessage('write broken.js', 'test-model', [], () => {}, () => {}, dir, () => {});
+
+  assert.equal(chatCallCount, 4, 'expected the nudge to trigger one extra fix-it round trip');
+  assert.match(result.response, /✅ Done: fixed the syntax error/);
+  assert.doesNotMatch(result.response, /Automatic verification/);
+  assert.equal(fs.readFileSync(path.join(dir, 'broken.js'), 'utf-8'), 'function fixed() {}\n');
+});
+
+test('processMessage reports (rather than silently accepting) a verification failure that survives MAX_VERIFY_NUDGES attempts', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kode-test-'));
+
+  let chatCallCount = 0;
+  const mockClient = {
+    getContextSize: async () => 8192,
+    abort() {},
+    chat: async (model, messages) => {
+      if (messages.length === 1 && messages[0].role === 'user') {
+        return { text: 'summary', toolCalls: [] };
+      }
+      chatCallCount++;
+      if (chatCallCount === 1) {
+        return {
+          text: '```tool\n{"tool": "create_file", "params": {"path": "broken.js", "content": "function broken( {"}}\n```',
+          toolCalls: [],
+        };
+      }
+      // Keeps claiming done without ever actually fixing the file.
+      return { text: '✅ Done: should be fine now.', toolCalls: [] };
+    },
+  };
+
+  const core = new AgentCore(mockClient, 8192, 'ollama');
+  const result = await core.processMessage('write broken.js', 'test-model', [], () => {}, () => {}, dir, () => {});
+
+  assert.match(result.response, /Automatic verification/);
+  assert.match(result.response, /broken\.js/);
+});
+
+test('processMessage does not run the project test suite when there is no real test script', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kode-test-'));
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
+    name: 'temp', version: '1.0.0',
+    scripts: { test: 'echo "Error: no test specified" && exit 1' },
+  }));
+
+  let chatCallCount = 0;
+  const mockClient = {
+    getContextSize: async () => 8192,
+    abort() {},
+    chat: async (model, messages) => {
+      if (messages.length === 1 && messages[0].role === 'user') return { text: 'summary', toolCalls: [] };
+      chatCallCount++;
+      if (chatCallCount === 1) {
+        return {
+          text: '```tool\n{"tool": "create_file", "params": {"path": "ok.js", "content": "function ok() {}\\n"}}\n```',
+          toolCalls: [],
+        };
+      }
+      return { text: '✅ Done: wrote ok.js.', toolCalls: [] };
+    },
+  };
+
+  const core = new AgentCore(mockClient, 8192, 'ollama');
+  const result = await core.processMessage('write ok.js', 'test-model', [], () => {}, () => {}, dir, () => {});
+
+  // Should finish clean on the first "Done" claim — no npm-init placeholder script
+  // should ever get invoked as if it were real.
+  assert.equal(chatCallCount, 2);
+  assert.match(result.response, /✅ Done: wrote ok\.js/);
+});
+
+test('processMessage catches a real test-suite failure after "✅ Done" and reports it', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kode-test-'));
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
+    name: 'temp', version: '1.0.0',
+    scripts: { test: 'exit 1' },
+  }));
+
+  let chatCallCount = 0;
+  const mockClient = {
+    getContextSize: async () => 8192,
+    abort() {},
+    chat: async (model, messages) => {
+      if (messages.length === 1 && messages[0].role === 'user') return { text: 'summary', toolCalls: [] };
+      chatCallCount++;
+      if (chatCallCount === 1) {
+        return {
+          text: '```tool\n{"tool": "create_file", "params": {"path": "ok.js", "content": "function ok() {}\\n"}}\n```',
+          toolCalls: [],
+        };
+      }
+      return { text: '✅ Done: wrote ok.js.', toolCalls: [] };
+    },
+  };
+
+  const core = new AgentCore(mockClient, 8192, 'ollama');
+  const result = await core.processMessage('write ok.js', 'test-model', [], () => {}, () => {}, dir, () => {});
+
+  assert.match(result.response, /test suite failed/i);
+});

@@ -1555,3 +1555,14 @@ const TOOL_SCHEMAS = [
 
 module.exports = tools;
 module.exports.TOOL_SCHEMAS = TOOL_SCHEMAS;
+// Exposed for AgentCore's post-"Done" verification gate (see core.js _verifyDoneClaim)
+// — not a model-callable tool, just the same write-time check create_file/edit_file/
+// apply_patch already run, reused so the model can't just ignore the inline note.
+// Defined non-enumerable so it doesn't show up in Object.keys(tools) — the dispatch
+// map iterated by getAvailableToolNames() and the "TOOL_SCHEMAS covers every tool
+// name" test (tools.test.js), which both assume every enumerable function here is a
+// real model-callable tool.
+Object.defineProperty(module.exports, 'quickSyntaxCheck', {
+  value: quickSyntaxCheck,
+  enumerable: false,
+});

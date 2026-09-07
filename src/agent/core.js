@@ -21,6 +21,14 @@ const MAX_TOOL_ITERATIONS = 25;
 // the loop forever.
 const MAX_STALL_NUDGES = 3;
 
+// How many times processMessage will nudge the model to fix a problem that automatic
+// post-"Done" verification (_verifyDoneClaim below) actually found, before giving up
+// and just reporting the problem instead of silently accepting the claim. Smaller than
+// MAX_STALL_NUDGES: a stall is a connection hiccup worth retrying a few times, but a
+// syntax error or failing test is a real defect — if the model can't fix it in a
+// couple of tries, more retries are unlikely to help and just burn time/tokens.
+const MAX_VERIFY_NUDGES = 2;
+
 // Buckets for the num_ctx we actually request from Ollama. Rather than always asking
 // for the model's full (capped) context window — which forces Ollama to allocate a
 // KV cache sized for the worst case on every single request — we size num_ctx to the
@@ -438,6 +446,94 @@ ${newlyDroppedText}`;
   }
 
   /**
+   * Re-verifies what this turn actually wrote to disk instead of trusting a "✅ Done"
+   * claim at face value — see the call site in processMessage for why. Two checks,
+   * cheapest first:
+   *   1. Re-run quickSyntaxCheck (tools.js) on every file this turn successfully
+   *      created/edited/patched. Cheap (milliseconds), and catches the exact class of
+   *      mistake local models make most (mismatched braces, bad escaping) even if the
+   *      model glossed over the same note already appended to the tool result.
+   *   2. If syntax is clean AND the project has a real `npm test` script (not the
+   *      npm-init placeholder) AND at least one file was touched, run the actual test
+   *      suite (bounded to at most MAX_VERIFY_NUDGES + 1 runs per turn — see the doc
+   *      comment on the test-suite check below for why re-running isn't wasteful here).
+   * @returns {Promise<string|null>} a description of the problem, or null if there's
+   *   nothing to verify (no files touched this turn) or everything checks out.
+   */
+  async _verifyDoneClaim(allToolResults, projectFolder) {
+    if (!projectFolder) return null;
+    const path = require('path');
+
+    // Files this turn actually wrote successfully. A plain Q&A turn, or one that only
+    // ran read-only tools (search_files, read_file, git_status, ...), has nothing here
+    // — that's the common case, and this function returns null immediately for it.
+    const touchedFiles = new Set();
+    for (const t of allToolResults) {
+      if (!t.result || typeof t.result !== 'string' || !t.result.startsWith('✅')) continue;
+      if (t.tool === 'create_file' || t.tool === 'edit_file') {
+        const p = t.params && t.params.path;
+        if (p) touchedFiles.add(path.isAbsolute(p) ? p : path.join(projectFolder, p));
+      } else if (t.tool === 'apply_patch') {
+        // apply_patch's result is one line per file hunk: "✅ Created <path> (...)" or
+        // "✅ Patched <path> (...)" — see tools.js.
+        for (const line of t.result.split('\n')) {
+          const m = line.match(/^✅ (?:Created|Patched) (\S+)/);
+          if (m) touchedFiles.add(path.isAbsolute(m[1]) ? m[1] : path.join(projectFolder, m[1]));
+        }
+      }
+    }
+    if (touchedFiles.size === 0) return null;
+
+    const syntaxIssues = [];
+    for (const filePath of touchedFiles) {
+      const check = tools.quickSyntaxCheck(filePath);
+      if (check && !check.ok) {
+        syntaxIssues.push(`${path.relative(projectFolder, filePath)}: ${check.error}`);
+      }
+    }
+    if (syntaxIssues.length > 0) {
+      return `A syntax check on the file(s) you just wrote found a problem:\n${syntaxIssues.join('\n')}`;
+    }
+
+    // Unlike the syntax check, tests only need a real script to run against. Re-run
+    // (rather than "once per turn") is deliberate: this point is only reached again
+    // when a previous attempt actually failed and the loop nudged for a fix — a clean
+    // pass falls straight through to acceptance below with no further looping — so
+    // it's naturally bounded to at most MAX_VERIFY_NUDGES + 1 runs per turn, and it's
+    // the only way to confirm the model's fix attempt actually worked rather than
+    // trusting a repeated "✅ Done" claim on faith.
+    if (this._hasRealTestScript(projectFolder)) {
+      const testResult = await tools.run_tests({}, projectFolder, {});
+      if (typeof testResult === 'string' && testResult.startsWith('❌')) {
+        return `The test suite failed after your changes:\n${testResult}`;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * True when projectFolder has a package.json with a real `test` script — i.e. NOT
+   * missing, and not npm init's default placeholder ("echo \"Error: no test
+   * specified\" && exit 1"). Guards _verifyDoneClaim so it never invents test work
+   * for a project that doesn't actually have a test suite.
+   */
+  _hasRealTestScript(projectFolder) {
+    const fs = require('fs');
+    const path = require('path');
+    try {
+      const pkgPath = path.join(projectFolder, 'package.json');
+      if (!fs.existsSync(pkgPath)) return false;
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+      const testScript = pkg.scripts && pkg.scripts.test;
+      if (!testScript || typeof testScript !== 'string') return false;
+      return !/Error:\s*no test specified/i.test(testScript);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Detect if user request is a vague project-level command.
    */
   _isProjectLevelRequest(message) {
@@ -609,6 +705,7 @@ ${newlyDroppedText}`;
       let iteration = 0;
       let finalResponse = '';
       let consecutiveStalls = 0; // see MAX_STALL_NUDGES
+      let consecutiveVerifyFails = 0; // see MAX_VERIFY_NUDGES / _verifyDoneClaim
       // Set true at every deliberate exit from the loop below (task done, user Stop,
       // stall budget exhausted). If the loop instead runs out of MAX_TOOL_ITERATIONS
       // while this is still false, the task was cut off mid-progress, not finished or
@@ -816,6 +913,37 @@ ${newlyDroppedText}`;
             break;
           }
 
+          // No tool calls attempted and the model believes the task is finished. Before
+          // trusting that at face value, force a verification pass on whatever this turn
+          // actually wrote to disk — a model saying "✅ Done" is not the same as the
+          // result being correct, and the per-file quickSyntaxCheck note already
+          // appended to each create_file/edit_file/apply_patch result (see tools.js) is
+          // easy to see in the tool log and still walk right past. Only fires when there
+          // is something to verify (hasDoneMarker, i.e. this is an actual completion
+          // claim, not just a plain Q&A reply with nothing to check).
+          if (hasDoneMarker) {
+            const verifyIssue = await this._verifyDoneClaim(allToolResults, projectFolder);
+            if (verifyIssue) {
+              if (consecutiveVerifyFails < MAX_VERIFY_NUDGES) {
+                consecutiveVerifyFails++;
+                console.warn(`[AgentCore] Verification found a problem after "✅ Done" (attempt ${consecutiveVerifyFails}/${MAX_VERIFY_NUDGES}) — nudging to fix it.`);
+                conversationHistory.push({ role: 'assistant', content: currentResponse });
+                conversationHistory.push({
+                  role: 'user',
+                  content: `Hold on — before that's actually done:\n${verifyIssue}\n\nFix it, then confirm again.`,
+                });
+                continue; // retry
+              }
+              // Nudge budget exhausted — report the problem plainly rather than quietly
+              // accepting a claim that automatic verification already disproved.
+              finalResponse = currentResponse +
+                `\n\n⚠️ Automatic verification still found a problem after ${MAX_VERIFY_NUDGES} attempt(s) to fix it:\n${verifyIssue}`;
+              conversationHistory.push({ role: 'assistant', content: finalResponse });
+              endedWithReason = true;
+              break;
+            }
+          }
+
           // No tool calls attempted — we're done
           finalResponse = currentResponse;
           conversationHistory.push({ role: 'assistant', content: currentResponse });
@@ -825,6 +953,7 @@ ${newlyDroppedText}`;
 
         // There are tool calls — real progress happened, so reset the stall counter.
         consecutiveStalls = 0;
+        consecutiveVerifyFails = 0;
 
         // There are tool calls — add assistant message to history
         conversationHistory.push({ role: 'assistant', content: currentResponse });
