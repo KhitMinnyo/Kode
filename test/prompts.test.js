@@ -37,7 +37,7 @@ test('supportsNativeToolCalling is case-insensitive and tolerates missing input'
 });
 
 test('supportsNativeToolCalling always returns true for cloud providers regardless of model name', () => {
-  for (const provider of ['openai', 'anthropic', 'deepseek']) {
+  for (const provider of ['openai', 'anthropic', 'deepseek', 'openrouter', 'custom']) {
     assert.equal(supportsNativeToolCalling('literally-any-model-name', provider), true, `${provider} should always support native tool calling`);
     assert.equal(supportsNativeToolCalling('', provider), true, `${provider} should support it even with no model name given`);
   }

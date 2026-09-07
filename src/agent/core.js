@@ -425,12 +425,24 @@ ${newlyDroppedText}`;
       let msgTokens = estimateTokens(msg.content);
 
       if (msgTokens > budget) {
-        // If this is the most recent message (must include), truncate it
+        // If this is the most recent message (must include), truncate it. The old
+        // flat `budget * 3.5` assumed every character is ASCII (~3.5 chars/token),
+        // which is wrong for non-ASCII scripts — Burmese/CJK/emoji tokenize far more
+        // densely (see estimateTokens) — and could let the truncated message still
+        // overflow the budget. Binary-search the longest prefix that actually fits
+        // per estimateTokens instead.
         if (selectedMessages.length === 0) {
-          const maxChars = Math.floor(budget * 3.5);
+          const content = msg.content;
+          let lo = 0;
+          let hi = content.length;
+          while (lo < hi) {
+            const mid = Math.ceil((lo + hi) / 2);
+            if (estimateTokens(content.slice(0, mid)) > budget) hi = mid - 1;
+            else lo = mid;
+          }
           selectedMessages.unshift({
             role: msg.role,
-            content: msg.content.substring(0, maxChars) + '\n... (truncated)',
+            content: content.slice(0, lo) + '\n... (truncated)',
           });
         }
         droppedCount = i + 1;

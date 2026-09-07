@@ -857,19 +857,37 @@ async function search_files(params, projectFolder) {
 
   try {
     const resolvedPath = path.isAbsolute(searchPath) ? searchPath : path.resolve(projectFolder || process.cwd(), searchPath);
-    const excludeFlags = SEARCH_EXCLUDE_DIRS.map((d) => `--exclude-dir='${d}'`).join(' ');
 
-    let cmd = `grep -rn ${excludeFlags} --include='*' "${pattern.replace(/"/g, '\\"')}" "${resolvedPath}" 2>/dev/null | head -50`;
-    if (file_pattern) {
-      cmd = `grep -rn ${excludeFlags} --include='${file_pattern}' "${pattern.replace(/"/g, '\\"')}" "${resolvedPath}" 2>/dev/null | head -50`;
-    }
+    // Build grep's argument list directly and run it WITHOUT a shell (execFileSync,
+    // not the old execSync(..., { shell: true })). The old shell string only escaped
+    // double quotes, leaving backticks, $(), ;, && and other metacharacters in the
+    // user/model-supplied `pattern` as a command-injection vector — and because
+    // search_files is in READ_ONLY_TOOLS (runs without confirmation, even in
+    // parallel), that was a real "read-only tool can execute arbitrary commands"
+    // hole. Passing pattern as a distinct argv entry means grep receives it as a
+    // literal regex string no matter what metacharacters it contains.
+    const args = ['-rn'];
+    for (const d of SEARCH_EXCLUDE_DIRS) args.push(`--exclude-dir=${d}`);
+    args.push(file_pattern ? `--include=${file_pattern}` : '--include=*');
+    args.push(pattern, resolvedPath);
 
-    const output = execSync(cmd, { encoding: 'utf-8', timeout: 15000, shell: DEFAULT_SHELL }).trim();
+    // Ignore stderr (permission errors on unreadable subdirs, etc.) like the old
+    // `2>/dev/null`; cap buffer so a single absurd match can't OOM the main process.
+    const raw = execFileSync('grep', args, {
+      encoding: 'utf-8',
+      timeout: 15000,
+      maxBuffer: 4 * 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
 
-    if (!output) return `🔍 No matches found for "${pattern}" in ${resolvedPath}`;
+    if (!raw) return `🔍 No matches found for "${pattern}" in ${resolvedPath}`;
 
-    const lines = output.split('\n');
-    return `🔍 Found ${lines.length}${lines.length >= 50 ? '+' : ''} matches for "${pattern}":\n\n${output}`;
+    // grep may still return exit 1 (no match) or 2 (error); a 0 exit with empty
+    // output is handled above. Apply the same 50-line cap `head -50` used to.
+    const lines = raw.split('\n');
+    const shown = lines.slice(0, 50);
+    const more = lines.length > 50 ? `\n\n(${lines.length - 50} more match(es) not shown)` : '';
+    return `🔍 Found ${lines.length}${lines.length > 50 ? '+' : ''} matches for "${pattern}":\n\n${shown.join('\n')}${more}`;
   } catch (err) {
     if (err.status === 1) return `🔍 No matches found for "${pattern}"`;
     return `❌ Search error: ${err.message}`;

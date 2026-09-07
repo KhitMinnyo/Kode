@@ -597,13 +597,17 @@ function getAvailableToolNames() {
  * than only the markdown ```tool``` block convention described in the system prompt.
  *
  * Cloud providers (OpenAI, Anthropic, DeepSeek) reliably support real function-calling
- * on every current model, so it's always used for them. For local Ollama models it's
- * much more hit-or-miss — most of Kode's actual target models (deepseek-r1, DeepHat,
- * dolphin) were never trained for it — so we only enable it for the specific families
- * known to support it well, to avoid adding unused tool-schema overhead everywhere else.
+ * on every current model, so it's always used for them. OpenRouter and Custom are
+ * OpenAI-compatible chat-completions APIs — the same native function-calling shape,
+ * and their clients (src/custom/client.js) already stream tool_calls back — so they're
+ * treated the same way too. For local Ollama models it's much more hit-or-miss — most
+ * of Kode's actual target models (deepseek-r1, DeepHat, dolphin) were never trained
+ * for it — so we only enable it for the specific families known to support it well,
+ * to avoid adding unused tool-schema overhead everywhere else.
  */
 function supportsNativeToolCalling(modelName = '', provider = 'ollama') {
-  if (provider === 'openai' || provider === 'anthropic' || provider === 'deepseek') {
+  if (provider === 'openai' || provider === 'anthropic' || provider === 'deepseek' ||
+      provider === 'openrouter' || provider === 'custom') {
     return true;
   }
 
