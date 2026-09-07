@@ -415,6 +415,40 @@ test('write_plan requires a non-empty steps array', async () => {
   assert.match(await tools.write_plan({ steps: [] }), /"steps".*required/i);
 });
 
+test('write_plan persists an incomplete plan to .kode/plan.json', async () => {
+  const dir = makeTempDir();
+  await tools.write_plan({
+    steps: [
+      { text: 'Read the file', status: 'done' },
+      { text: 'Fix the bug', status: 'pending' },
+    ],
+  }, dir);
+
+  const planPath = path.join(dir, '.kode', 'plan.json');
+  assert.ok(fs.existsSync(planPath), 'expected .kode/plan.json to be written');
+  const saved = JSON.parse(fs.readFileSync(planPath, 'utf-8'));
+  assert.equal(saved.steps.length, 2);
+  assert.equal(saved.steps[0].status, 'done');
+  assert.ok(typeof saved.updatedAt === 'number');
+});
+
+test('write_plan clears the persisted plan once every step is done', async () => {
+  const dir = makeTempDir();
+  await tools.write_plan({ steps: [{ text: 'Step 1', status: 'pending' }] }, dir);
+  const planPath = path.join(dir, '.kode', 'plan.json');
+  assert.ok(fs.existsSync(planPath), 'expected the plan to exist while incomplete');
+
+  await tools.write_plan({ steps: [{ text: 'Step 1', status: 'done' }] }, dir);
+  assert.ok(!fs.existsSync(planPath), 'expected the plan file to be removed once complete');
+});
+
+test('write_plan does not touch disk when no project folder is active', async () => {
+  // Should behave exactly as it did before persistence was added — no projectFolder,
+  // no crash, just the formatted checklist.
+  const result = await tools.write_plan({ steps: [{ text: 'Step 1', status: 'pending' }] });
+  assert.match(result, /0\/1 done/);
+});
+
 // ─── Semantic search (index_codebase / semantic_search) ─────────────────────
 
 test('index_codebase and semantic_search fail clearly without an embedding-capable client', async () => {

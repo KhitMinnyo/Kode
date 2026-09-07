@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { execSync, execFileSync, spawn } = require('child_process');
 const memory = require('./memory');
+const plan = require('./plan');
 const processManager = require('./processManager');
 const { parseUnifiedDiff, applyHunksToContent, PatchError } = require('./patch');
 const embeddings = require('./embeddings');
@@ -1067,29 +1068,36 @@ async function run_tests(params = {}, projectFolder, toolContext = {}) {
 
 /**
  * Tool: write_plan
- * Stateless planning/todo tool. Doesn't persist anything — it exists to give the model
- * (especially smaller local models, which lose track of multi-step tasks easily) a
- * habit of laying out its steps explicitly before acting, and re-calling this to check
- * items off as it goes. The formatted checklist becomes part of the tool-execution log
- * the user sees in the UI, so it doubles as visible progress reporting.
+ * Lays out (or updates) a step-by-step checklist for a multi-step task — gives the
+ * model (especially smaller local models, which lose track of multi-step tasks
+ * easily) a habit of committing to its steps explicitly before acting, then checking
+ * items off as it goes. The formatted checklist becomes part of the tool-execution
+ * log the user sees in the UI, so it doubles as visible progress reporting.
+ *
+ * Persisted to <project>/.kode/plan.json (see agent/plan.js) whenever a project
+ * folder is active, so the plan — and how far through it the agent had gotten —
+ * survives context trims, app restarts, and starting a fresh chat on the same
+ * project. getSystemPrompt resurfaces an incomplete plan at the start of a new turn
+ * so the model can pick up where it left off instead of the task being silently
+ * forgotten. Cleared automatically once every step is marked done.
  */
-async function write_plan(params = {}) {
+async function write_plan(params = {}, projectFolder) {
   const { steps } = params;
   if (!Array.isArray(steps) || steps.length === 0) {
     return '❌ Error: "steps" parameter is required — an array of {text, status} objects.';
   }
 
-  const lines = steps.map((s, i) => {
-    const text = (s && s.text) ? String(s.text) : `Step ${i + 1}`;
-    const status = s && typeof s.status === 'string' ? s.status.toLowerCase() : 'pending';
-    const box = status === 'done' || status === 'completed' ? '[x]'
-      : status === 'in_progress' || status === 'doing' ? '[~]'
-      : '[ ]';
-    return `${box} ${text}`;
-  });
+  const { text } = plan.formatPlan(steps);
 
-  const done = lines.filter(l => l.startsWith('[x]')).length;
-  return `📋 Plan (${done}/${lines.length} done):\n${lines.join('\n')}`;
+  if (projectFolder) {
+    if (plan.isPlanComplete(steps)) {
+      plan.clearPlan(projectFolder);
+    } else {
+      plan.savePlan(projectFolder, steps);
+    }
+  }
+
+  return text;
 }
 
 /**

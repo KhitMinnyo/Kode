@@ -1,5 +1,7 @@
 'use strict';
 
+const plan = require('./plan');
+
 // Keywords/patterns that indicate a task is security/pentest-flavored. Kept in one
 // place so core.js's scan-output detector and this module can both reason about
 // "does this look like a security task" consistently if needed later.
@@ -55,6 +57,25 @@ function getSystemPrompt(projectFolder, modelName = '', userMessage = '') {
     ? (isSecurityModel ? getRedTeamPrompt() : getPentestPrompt())
     : '';
 
+  // Resurface an incomplete persisted plan (see agent/plan.js) so a multi-step task
+  // doesn't have to be re-explained from scratch after an app restart or a fresh chat
+  // on the same project — write_plan (agent/tools.js) is what wrote it, and clears it
+  // automatically once every step is marked done, so only a genuinely unfinished plan
+  // ever shows up here.
+  const activePlanData = projectFolder ? plan.loadPlan(projectFolder) : null;
+  const activePlanSection = (activePlanData && !plan.isPlanComplete(activePlanData.steps))
+    ? `
+
+## Resuming an In-Progress Plan
+A plan from an earlier turn or session on this project is still incomplete:
+${plan.formatPlan(activePlanData.steps).text}
+
+If this matches what you're being asked to do now, pick up where it left off — no need
+to re-plan from scratch, just keep working through the remaining steps and call
+write_plan again as you complete each one. If the current request is unrelated to this
+plan, ignore it and start fresh; write_plan will replace it.`
+    : '';
+
   const pentesterMindsetSection = includeSecuritySection ? `
 ## Pentester Mindset
 You are a penetration tester. When given a target (IP, domain, URL):
@@ -79,6 +100,7 @@ You think and act like an experienced penetration tester AND a senior developer.
 ## Environment
 - macOS/Linux, zsh/bash shell
 - ${cwd}
+${activePlanSection}
 
 ## CRITICAL: Direct Action vs Planning
 
@@ -145,7 +167,7 @@ already asked for the whole task; don't hand it back to them half-finished.
 - **git_revert** — file, ref (undo: no params = discard uncommitted changes; file = revert just that file; ref with no file = hard-reset the whole project, destructive)
 - **apply_patch** — patch (apply a unified diff — prefer this over edit_file for multi-line/multi-file changes)
 - **run_tests** — command (run the test suite, npm test by default, and report pass/fail)
-- **write_plan** — steps (lay out or update a step-by-step checklist for a multi-step task)
+- **write_plan** — steps (lay out or update a step-by-step checklist for a multi-step task; persisted to .kode/plan.json so it survives restarts/new chats until every step is done)
 - **index_codebase** — model (build/rebuild the local semantic search index; requires an Ollama embedding model)
 - **semantic_search** — query, limit (search code by meaning, not literal text; requires index_codebase first)
 
