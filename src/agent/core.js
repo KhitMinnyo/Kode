@@ -52,12 +52,37 @@ function bucketNumCtx(neededTokens, maxContext) {
 }
 
 /**
- * Rough token estimator — ~3.5 chars per token for English/code.
- * This avoids needing a real tokenizer while being conservative enough.
+ * Rough token estimator — deliberately not a real per-model tokenizer. Kode talks to
+ * many different model families (Ollama's local GGUF models, DeepSeek, OpenAI,
+ * Anthropic, any OpenAI-compatible custom endpoint), each with its own tokenizer, so
+ * even a "real" tokenizer (e.g. OpenAI's cl100k_base) would only be correct for ONE
+ * of those providers and still wrong for the rest — while adding a 20MB+ dependency
+ * bundled into every platform's installer just to be precise for a single provider.
+ * This stays a calibrated heuristic on purpose.
+ *
+ * The old flat text.length/3.5 assumed every character costs the same ~3.5
+ * chars/token, which is roughly right for ASCII English/code but badly wrong for
+ * non-Latin scripts: BPE vocabularies are trained overwhelmingly on English/code
+ * corpora, so non-ASCII text (Burmese, Chinese, Japanese, Korean, Thai, emoji, ...)
+ * tokenizes far more densely — often close to 1 token per character once it falls
+ * back to byte-level encoding, not 3.5 chars/token. A conversation in Burmese (this
+ * app's own UI/support language for a chunk of its users) was having its real token
+ * cost under-counted by roughly 3x, which could let _buildContextMessages's context
+ * budget silently overflow well past what it thought it was requesting.
  */
 function estimateTokens(text) {
   if (!text) return 0;
-  return Math.ceil(text.length / 3.5);
+  const str = String(text);
+  let asciiChars = 0;
+  let nonAsciiChars = 0;
+  for (let i = 0; i < str.length; i++) {
+    if (str.charCodeAt(i) < 128) asciiChars++;
+    else nonAsciiChars++;
+  }
+  // ASCII (English prose, code, punctuation): same ~3.5 chars/token calibration as
+  // before. Non-ASCII: ~1.2 chars/token, much closer to how BPE tokenizers actually
+  // handle scripts they weren't heavily trained on.
+  return Math.ceil(asciiChars / 3.5 + nonAsciiChars / 1.2);
 }
 
 /**

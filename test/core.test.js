@@ -21,10 +21,32 @@ test('bucketNumCtx never exceeds the model max, even if that max sits between bu
   assert.equal(bucketNumCtx(100000, 200000), 131072);
 });
 
-test('estimateTokens is a rough ~3.5 chars/token estimate', () => {
+test('estimateTokens is a rough ~3.5 chars/token estimate for plain ASCII text', () => {
   assert.equal(estimateTokens(''), 0);
   assert.equal(estimateTokens(null), 0);
   assert.equal(estimateTokens('abcdefg'), Math.ceil(7 / 3.5));
+});
+
+test('estimateTokens counts non-ASCII text (e.g. Burmese) far more densely than ASCII', () => {
+  // Same character count, ASCII vs Burmese — the old flat chars/3.5 heuristic would
+  // have returned the same estimate for both, badly under-counting the real token
+  // cost of non-Latin scripts that BPE tokenizers weren't heavily trained on.
+  const asciiText = 'abcdefghij'; // 10 ASCII chars
+  const burmeseText = 'ကျေးဇူးတင်'; // 10 UTF-16 code units of Burmese script
+  assert.equal(burmeseText.length, 10);
+
+  const asciiEstimate = estimateTokens(asciiText);
+  const burmeseEstimate = estimateTokens(burmeseText);
+  assert.ok(burmeseEstimate > asciiEstimate,
+    `expected Burmese text to estimate to more tokens than the same-length ASCII text (got ascii=${asciiEstimate}, burmese=${burmeseEstimate})`);
+  // Roughly the ~1.2 chars/token calibration for non-ASCII.
+  assert.equal(burmeseEstimate, Math.ceil(10 / 1.2));
+});
+
+test('estimateTokens handles mixed ASCII/non-ASCII text by weighting each portion separately', () => {
+  const mixed = 'hello ကျေးဇူးတင်'; // 6 ASCII chars ("hello ") + 10 Burmese chars
+  const expected = Math.ceil(6 / 3.5 + 10 / 1.2);
+  assert.equal(estimateTokens(mixed), expected);
 });
 
 test('parseToolCalls extracts well-formed ```tool blocks', () => {
