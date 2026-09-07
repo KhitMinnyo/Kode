@@ -609,11 +609,17 @@ ${newlyDroppedText}`;
       let iteration = 0;
       let finalResponse = '';
       let consecutiveStalls = 0; // see MAX_STALL_NUDGES
+      // Set true at every deliberate exit from the loop below (task done, user Stop,
+      // stall budget exhausted). If the loop instead runs out of MAX_TOOL_ITERATIONS
+      // while this is still false, the task was cut off mid-progress, not finished or
+      // abandoned — see the check right after the loop.
+      let endedWithReason = false;
 
       while (iteration < MAX_TOOL_ITERATIONS) {
         iteration++;
 
         if (!this._isGenerating) {
+          endedWithReason = true;
           break;
         }
 
@@ -687,6 +693,7 @@ ${newlyDroppedText}`;
           // otherwise (both are a truncated response with no tool calls).
           finalResponse = (currentResponse ? currentResponse + '\n\n' : '') + '⏹️ Stopped.';
           conversationHistory.push({ role: 'assistant', content: finalResponse });
+          endedWithReason = true;
           break;
         }
 
@@ -707,6 +714,7 @@ ${newlyDroppedText}`;
           if (stalledEmpty && consecutiveStalls >= MAX_STALL_NUDGES) {
             finalResponse = `⚠️ The connection stalled repeatedly (${MAX_STALL_NUDGES} attempts) before the model produced a response. Try again, or check your connection or model.`;
             conversationHistory.push({ role: 'assistant', content: finalResponse });
+            endedWithReason = true;
             break;
           }
           if (stalledEmpty) {
@@ -804,12 +812,14 @@ ${newlyDroppedText}`;
             finalResponse = (currentResponse ? currentResponse + '\n\n' : '') +
               `⚠️ The connection kept stalling after ${MAX_STALL_NUDGES} retries. This response may be incomplete — try again, or check your connection or model.`;
             conversationHistory.push({ role: 'assistant', content: finalResponse });
+            endedWithReason = true;
             break;
           }
 
           // No tool calls attempted — we're done
           finalResponse = currentResponse;
           conversationHistory.push({ role: 'assistant', content: currentResponse });
+          endedWithReason = true;
           break;
         }
 
@@ -887,6 +897,18 @@ ${newlyDroppedText}`;
 
         // Continue the loop — the LLM will see the tool results and may generate more tool calls
         finalResponse = currentResponse;
+      }
+
+      // The loop can only reach here without endedWithReason set by running out of
+      // MAX_TOOL_ITERATIONS while the model was still actively making tool-call
+      // progress each iteration (never hit a stop/done/stall-exhausted branch above).
+      // Previously this silently returned the last "did X, moving on" one-liner as if
+      // it were the finished answer — indistinguishable from the task actually being
+      // done. Say plainly that it was cut off by the safety limit instead.
+      if (!endedWithReason) {
+        finalResponse = (finalResponse ? finalResponse + '\n\n' : '') +
+          `⚠️ Stopped after ${MAX_TOOL_ITERATIONS} steps in a single turn (safety limit) — the task may not be fully finished. Ask me to continue and I'll pick up from here.`;
+        conversationHistory.push({ role: 'assistant', content: finalResponse });
       }
 
       this._isGenerating = false;

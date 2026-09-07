@@ -399,3 +399,57 @@ test('processMessage labels a user-initiated Stop distinctly from a stall in the
   // Must not be confused with the stall give-up wording.
   assert.doesNotMatch(result.response, /kept stalling/i);
 });
+
+test('processMessage stops gracefully after MAX_TOOL_ITERATIONS with a clear message, instead of silently truncating', async () => {
+  // The model keeps calling a tool forever and never says "✅ Done" — simulates a task
+  // that's still making real progress each iteration but never wraps up within the
+  // iteration safety limit (see MAX_TOOL_ITERATIONS in core.js, currently 25).
+  let chatCallCount = 0;
+  const mockClient = {
+    getContextSize: async () => 8192,
+    abort() {},
+    chat: async (model, messages) => {
+      // _buildContextMessages can summarize dropped history via its own one-shot
+      // chat() call (a single user message) once history grows large enough across 25
+      // iterations — distinct from the main loop's calls, which always pass the full
+      // system+history messages array. Answer it with plain text and don't count it
+      // toward the iteration-loop assertions below.
+      if (messages.length === 1 && messages[0].role === 'user') {
+        return { text: 'summary of earlier steps', toolCalls: [] };
+      }
+      chatCallCount++;
+      return {
+        text: `\`\`\`tool\n{"tool": "run_command", "params": {"command": "echo step ${chatCallCount}"}}\n\`\`\``,
+        toolCalls: [],
+      };
+    },
+  };
+
+  const core = new AgentCore(mockClient, 8192, 'ollama');
+  const result = await core.processMessage('do an endless task', 'test-model', [], () => {}, () => {}, null, () => {});
+
+  assert.equal(chatCallCount, 25, 'expected exactly MAX_TOOL_ITERATIONS main-loop chat calls');
+  assert.equal(result.toolResults.length, 25, 'expected a tool call on every one of the 25 iterations');
+  assert.match(result.response, /safety limit/i);
+});
+
+test('processMessage does not add a safety-limit message when the task finishes normally within the iteration budget', async () => {
+  let chatCallCount = 0;
+  const mockClient = {
+    getContextSize: async () => 8192,
+    abort() {},
+    chat: async () => {
+      chatCallCount++;
+      if (chatCallCount === 1) {
+        return { text: '```tool\n{"tool": "run_command", "params": {"command": "echo hi"}}\n```', toolCalls: [] };
+      }
+      return { text: '✅ Done: ran echo hi.', toolCalls: [] };
+    },
+  };
+
+  const core = new AgentCore(mockClient, 8192, 'ollama');
+  const result = await core.processMessage('run echo hi', 'test-model', [], () => {}, () => {}, null, () => {});
+
+  assert.doesNotMatch(result.response, /safety limit/i);
+  assert.match(result.response, /✅ Done/);
+});
