@@ -773,6 +773,12 @@ function registerIPCHandlers() {
           tabId: effectiveTabId,
           response: result.response,
           toolResults: result.toolResults,
+          // Lets the renderer auto-continue a task that was cut off by the per-turn
+          // safety limit while still actively progressing, instead of requiring the
+          // user to notice and retype "continue" themselves — see app.js's
+          // maybeAutoContinue(). Not set (falsy) for a finished task, a user Stop, or
+          // a stall/connection give-up.
+          hitIterationCeiling: result.hitIterationCeiling === true,
         });
       }
 

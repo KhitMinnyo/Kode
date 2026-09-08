@@ -63,6 +63,7 @@
       _statusStartTime: null,
       _lastStatusKind: null,     // 'thinking' | 'tool' | 'generating' — lets updateAgentStatus() detect a new step
       _tokenCount: 0,
+      autoContinueCount: 0,      // consecutive safety-limit auto-continues so far — see maybeAutoContinue()
     };
   }
 
@@ -749,7 +750,7 @@
   function setupInputListeners() {
     // Send button
     const btn = sendBtn();
-    if (btn) btn.addEventListener('click', sendMessage);
+    if (btn) btn.addEventListener('click', () => sendMessage());
 
     // Stop button
     const stop = stopBtn();
@@ -948,7 +949,47 @@
   /* ==========================================================
      Send Message
      ========================================================== */
-  async function sendMessage() {
+  // Caps how many consecutive times a single uninterrupted task can be auto-continued
+  // past the per-turn tool-call safety limit (see AgentCore's maxToolIterations and
+  // hitIterationCeiling) before handing control back to the user. Without a cap, a
+  // genuinely stuck task (looping without real progress each turn, or hitting the
+  // limit for an unrelated reason) would keep silently re-sending forever — the
+  // budget resets the moment the user sends their own message (see sendMessage above).
+  const AUTO_CONTINUE_LIMIT = 5;
+  const AUTO_CONTINUE_DELAY_MS = 1200; // brief pause so the "stopped" message is readable, and gives the user a moment to redirect instead
+
+  /**
+   * Called after a stream-end whose hitIterationCeiling flag is true — the model was
+   * still making real progress when it hit AgentCore's per-turn safety limit, so
+   * automatically resume the SAME task instead of leaving the user to notice the
+   * "⚠️ Stopped after N steps..." message and retype "continue" by hand every time.
+   * Only ever acts on the tab that's focused *when the delay fires* (a background
+   * tab's own stale "ask me to continue" message is left as-is — the user can resume
+   * it manually when they switch to it), and always re-checks that the tab is still
+   * open and idle right before sending, since a lot can change in AUTO_CONTINUE_DELAY_MS.
+   */
+  function maybeAutoContinue(tab) {
+    if (tab.autoContinueCount >= AUTO_CONTINUE_LIMIT) return;
+    tab.autoContinueCount++;
+    const count = tab.autoContinueCount;
+    setTimeout(() => {
+      if (!state.tabs.includes(tab)) return;   // tab was closed during the delay
+      if (tab.isGenerating) return;             // the user already started something else
+      if (tab !== activeTab()) return;          // user switched away — don't hijack whatever they're looking at now
+      const input = messageInput();
+      if (!input) return;
+      input.value = `Continue — you were cut off by the per-turn tool-call safety limit before the task was fully done (auto-continuing ${count}/${AUTO_CONTINUE_LIMIT}). Pick up exactly where you left off.`;
+      sendMessage(true);
+    }, AUTO_CONTINUE_DELAY_MS);
+  }
+
+  /**
+   * @param {boolean} isAutoContinue - true when this send was triggered automatically
+   *   by maybeAutoContinue() rather than typed by the user — suppresses the
+   *   autoContinueCount reset below so an auto-continued send doesn't immediately
+   *   re-arm its own budget (which would make AUTO_CONTINUE_LIMIT meaningless).
+   */
+  async function sendMessage(isAutoContinue = false) {
     const input = messageInput();
     if (!input) return;
 
@@ -964,6 +1005,11 @@
       appendError('Please select a model first.');
       return;
     }
+
+    // A genuine user-initiated send resets the auto-continue budget — it's meant to
+    // cap how many times the safety limit can auto-resume the SAME uninterrupted
+    // task, not to limit the whole session.
+    if (!isAutoContinue) tab.autoContinueCount = 0;
 
     // Clear input, reset height, and empty the attachment tray immediately (like
     // Claude's own attach UI) — this turn's attachments are captured in
@@ -1118,7 +1164,7 @@
       if (focused && !tab.userHasScrolled) scrollToBottom();
     });
 
-    window.kode.onStreamEnd(({ tabId, response, toolResults }) => {
+    window.kode.onStreamEnd(({ tabId, response, toolResults, hitIterationCeiling }) => {
       const tab = findTabById(tabId);
       if (!tab) return;
       const focused = tab === activeTab();
@@ -1176,6 +1222,8 @@
       renderTabBar();
 
       if (focused && !tab.userHasScrolled) scrollToBottom();
+
+      if (hitIterationCeiling) maybeAutoContinue(tab);
     });
 
     window.kode.onStreamError(({ tabId, error }) => {

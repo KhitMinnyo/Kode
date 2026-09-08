@@ -924,6 +924,7 @@ test('processMessage nudges on a stalled-but-nonempty response even before any t
   assert.equal(chatCallCount, 4, 'expected 3 stall-nudge retries plus 1 final give-up');
   assert.match(result.response, /kept stalling/i);
   assert.match(result.response, /partial output before the connection stalled/);
+  assert.equal(result.hitIterationCeiling, false, 'a stall give-up is a deliberate exit (endedWithReason), not the iteration ceiling');
 });
 
 test('processMessage nudges a stall that happens after real tool work, then gives up with the partial text preserved', async () => {
@@ -949,6 +950,7 @@ test('processMessage nudges a stall that happens after real tool work, then give
   // 1 tool-call turn + 3 stall-nudge retries + 1 final give-up
   assert.equal(chatCallCount, 5);
   assert.match(result.response, /kept stalling/i);
+  assert.equal(result.hitIterationCeiling, false);
 
   const runCommandResult = result.toolResults.find(t => t.tool === 'run_command');
   assert.ok(runCommandResult, 'expected run_command to have actually run before the stall');
@@ -974,6 +976,7 @@ test('processMessage labels a user-initiated Stop distinctly from a stall in the
   assert.match(result.response, /partial answer before the user hit stop/);
   // Must not be confused with the stall give-up wording.
   assert.doesNotMatch(result.response, /kept stalling/i);
+  assert.equal(result.hitIterationCeiling, false, 'a user Stop must never be auto-continued (see app.js maybeAutoContinue)');
 });
 
 test('processMessage stops gracefully after MAX_TOOL_ITERATIONS with a clear message, instead of silently truncating', async () => {
@@ -1007,6 +1010,7 @@ test('processMessage stops gracefully after MAX_TOOL_ITERATIONS with a clear mes
   assert.equal(chatCallCount, 25, 'expected exactly MAX_TOOL_ITERATIONS main-loop chat calls');
   assert.equal(result.toolResults.length, 25, 'expected a tool call on every one of the 25 iterations');
   assert.match(result.response, /safety limit/i);
+  assert.equal(result.hitIterationCeiling, true, 'cut off mid-progress by the iteration cap — this is exactly what app.js\'s auto-continue should act on');
 });
 
 test('processMessage does not add a safety-limit message when the task finishes normally within the iteration budget', async () => {
@@ -1028,6 +1032,7 @@ test('processMessage does not add a safety-limit message when the task finishes 
 
   assert.doesNotMatch(result.response, /safety limit/i);
   assert.match(result.response, /✅ Done/);
+  assert.equal(result.hitIterationCeiling, false);
 });
 
 // ─── Post-"✅ Done" verification (_verifyDoneClaim) ──────────────────────────

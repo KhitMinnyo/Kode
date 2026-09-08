@@ -84,7 +84,7 @@ contextBridge.exposeInMainWorld('kode', {
 
   /**
    * Register a callback for when streaming ends.
-   * @param {function({tabId: string, response: string, toolResults: Array}): void} callback
+   * @param {function({tabId: string, response: string, toolResults: Array, hitIterationCeiling: boolean}): void} callback
    * @returns {function(): void} Cleanup function to remove the listener
    */
   onStreamEnd: (callback) => {

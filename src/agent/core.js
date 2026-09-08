@@ -934,7 +934,7 @@ ${newlyDroppedText}`;
    *   Pass null (or omit) when there's no UI to ask through — ask_user then reports itself
    *   unavailable rather than hanging, so the model falls back to its own best judgment. See
    *   src/agent/tools.js's ask_user and main.js's makeAskUserCallback.
-   * @returns {Promise<{response: string, toolResults: Array<{tool: string, params: object, result: string}>}>}
+   * @returns {Promise<{response: string, toolResults: Array<{tool: string, params: object, result: string}>, hitIterationCeiling: boolean}>}
    */
   async processMessage(userMessage, model, conversationHistory, onToken = () => {}, onToolExecution = () => {}, projectFolder = null, onStatus = () => {}, onConfirmCommand = null, onAskUser = null) {
     if (!userMessage || typeof userMessage !== 'string') {
@@ -1333,6 +1333,15 @@ ${newlyDroppedText}`;
       return {
         response: finalResponse,
         toolResults: allToolResults,
+        // True only when the loop above exited by running out of
+        // this.maxToolIterations while the model was still actively making progress
+        // every iteration (the exact !endedWithReason case right above) — NOT set for
+        // a genuinely finished task, a user Stop, or a stall/connection give-up (all
+        // of those set endedWithReason themselves). Lets a caller (see main.js's
+        // stream-end payload and app.js's auto-continue) distinguish "cut off mid-task
+        // by the safety limit" from every other reason a turn can end, instead of
+        // pattern-matching the human-readable message text above.
+        hitIterationCeiling: !endedWithReason,
       };
     } catch (err) {
       this._isGenerating = false;

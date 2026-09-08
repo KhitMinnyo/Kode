@@ -327,4 +327,36 @@ test('renderer parallel tabs and ask_user modal', async (t) => {
     assert.equal(optionBtn.querySelector('b'), null, 'expected no actual <b> element to have been created');
     assert.equal(optionBtn.textContent, '<b>bold option</b>');
   });
+
+  // Auto-continue past AgentCore's per-turn safety limit (see core.js's
+  // hitIterationCeiling and app.js's maybeAutoContinue) — reuses tab2, the only tab
+  // still open at this point (tab1 was closed above). tab2 is focused and idle
+  // (isGenerating false since its own stream-end earlier), matching the real
+  // conditions maybeAutoContinue requires before it will act.
+  await t.test('hitIterationCeiling in stream-end payload triggers an automatic continue after a short delay', async () => {
+    const beforeCount = captured.sendMessageCalls.length;
+    captured.onStreamEnd({
+      tabId: tab2Id,
+      response: '⚠️ Stopped after 25 steps in a single turn (safety limit) — the task may not be fully finished. Ask me to continue and I\'ll pick up from here.',
+      toolResults: [],
+      hitIterationCeiling: true,
+    });
+
+    // Deliberately delayed, not instant — see AUTO_CONTINUE_DELAY_MS in app.js.
+    await new Promise((r) => setTimeout(r, 5));
+    assert.equal(captured.sendMessageCalls.length, beforeCount, 'expected the auto-continue to wait rather than fire immediately');
+
+    await new Promise((r) => setTimeout(r, 1400));
+    assert.equal(captured.sendMessageCalls.length, beforeCount + 1, 'expected exactly one automatic follow-up send');
+    const autoCall = captured.sendMessageCalls[captured.sendMessageCalls.length - 1];
+    assert.equal(autoCall.tabId, tab2Id);
+    assert.match(autoCall.message, /auto-continuing/i);
+  });
+
+  await t.test('a normal finish (hitIterationCeiling: false) never triggers an auto-continue', async () => {
+    const beforeCount = captured.sendMessageCalls.length;
+    captured.onStreamEnd({ tabId: tab2Id, response: '✅ Done: finished normally.', toolResults: [], hitIterationCeiling: false });
+    await new Promise((r) => setTimeout(r, 1400));
+    assert.equal(captured.sendMessageCalls.length, beforeCount, 'expected no automatic follow-up send for a normal finish');
+  });
 });
