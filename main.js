@@ -191,6 +191,7 @@ function getDefaultSettings() {
     customBaseUrl: '',           // Base URL for the custom provider, e.g. https://api.groq.com/openai/v1
     customContextSize: 32768,    // Assumed context window for the custom provider — not auto-detectable, see src/custom/client.js
     maxContextTokens: 16384,     // Context-size ceiling; raise for large-context models (e.g. Qwen3.6)
+    maxToolIterations: 50,       // Per-turn safety cap on model↔tool round-trips (see AgentCore). Raise for long multi-file tasks; a cloud model can run much longer than a local one.
     confirmRiskyCommands: true,  // Pause run_command's "risky but allowed" tier (curl|sh, base64->sh, etc.) for user approval — see src/agent/tools.js
     firecrawlApiKey: '',         // Firecrawl API key, used by the firecrawl_scrape tool (falls back to FIRECRAWL_API_KEY env var if unset)
     braveSearchApiKey: '',       // Brave Search API key, used by the web_search tool (falls back to BRAVE_SEARCH_API_KEY env var if unset)
@@ -352,7 +353,7 @@ function getOrCreateTabAgent(tabId) {
   let entry = tabAgents.get(tabId);
   if (!entry) {
     const client = createClientForActiveProvider();
-    const agentCore = new AgentCore(client, appSettings.maxContextTokens, appSettings.provider);
+    const agentCore = new AgentCore(client, appSettings.maxContextTokens, appSettings.provider, appSettings.maxToolIterations);
     agentCore.setToolApiKeys(appSettings);
     entry = { agentCore, client, provider: appSettings.provider };
     tabAgents.set(tabId, entry);
@@ -381,10 +382,11 @@ function reconfigureTabAgentsOnSettingsChange() {
     if (entry.provider === appSettings.provider) {
       applySettingsToClient(entry.client, entry.provider);
       entry.agentCore.setMaxContextCap(appSettings.maxContextTokens);
+      entry.agentCore.setMaxToolIterations(appSettings.maxToolIterations);
       entry.agentCore.setToolApiKeys(appSettings);
     } else {
       const client = createClientForActiveProvider();
-      const agentCore = new AgentCore(client, appSettings.maxContextTokens, appSettings.provider);
+      const agentCore = new AgentCore(client, appSettings.maxContextTokens, appSettings.provider, appSettings.maxToolIterations);
       agentCore.setToolApiKeys(appSettings);
       tabAgents.set(tabId, { agentCore, client, provider: appSettings.provider });
     }

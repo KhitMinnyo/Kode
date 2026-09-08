@@ -9,8 +9,10 @@ const { TOOL_SCHEMAS } = tools;
 // Allow multi-step task execution. Bumped from 15: with write_plan encouraging explicit
 // step tracking and git_checkpoint/git_revert making mistakes cheap to undo, longer
 // multi-file tasks (the ones local models most need help staying on track for) were
-// hitting the old ceiling before finishing.
-const MAX_TOOL_ITERATIONS = 25;
+// hitting the old ceiling before finishing. This is now the DEFAULT only — the live
+// limit lives on each AgentCore instance (this.maxToolIterations), configurable from
+// Settings so cloud models with a longer useful run don't get cut off mid-task.
+const DEFAULT_MAX_TOOL_ITERATIONS = 25;
 
 // How many times in a row processMessage will auto-nudge the model to keep going (or
 // explicitly confirm it's done) instead of ending the turn — see the "stall" check
@@ -227,11 +229,15 @@ class AgentCore {
   /**
    * @param {import('../ollama/client')} ollamaClient
    */
-  constructor(ollamaClient, maxContextCap = 16384, provider = 'ollama') {
+  constructor(ollamaClient, maxContextCap = 16384, provider = 'ollama', maxToolIterations = DEFAULT_MAX_TOOL_ITERATIONS) {
     if (!ollamaClient) {
       throw new Error('OllamaClient instance is required');
     }
     this.ollamaClient = ollamaClient;
+    // Per-turn safety limit on how many model↔tool round-trips this agent will run
+    // before cutting the turn off (see the cutoff message after the loop below).
+    // Configurable from Settings — setMaxToolIterations() mirrors setMaxContextCap().
+    this.maxToolIterations = this._sanitizeMaxToolIterations(maxToolIterations);
     this._isGenerating = false;
     // AbortController for whatever tool call is currently in flight (run_command,
     // run_tests) — see stopGeneration() below. A separate concern from
@@ -288,6 +294,25 @@ class AgentCore {
     this.maxContextCap = parsed;
     this._contextSizeCache = {};
     console.log(`[AgentCore] Max context cap set to ${this.maxContextCap}`);
+  }
+
+  /** Coerce a raw max-tool-iterations value into a sane in-range integer. */
+  _sanitizeMaxToolIterations(value) {
+    const parsed = parseInt(value, 10);
+    if (!Number.isFinite(parsed)) return DEFAULT_MAX_TOOL_ITERATIONS;
+    // Keep it bounded: min 1 (never allow an infinite loop), max 500 (plenty for any
+    // real multi-step task while still guaranteeing the turn eventually terminates).
+    return Math.min(500, Math.max(1, parsed));
+  }
+
+  /**
+   * Update the per-turn tool-iteration limit (from Settings). Unlike maxContextCap this
+   * applies to ALL providers — cloud models are exactly the ones that most often need a
+   * higher limit to finish a long multi-file task without being cut off at the default.
+   */
+  setMaxToolIterations(maxToolIterations) {
+    this.maxToolIterations = this._sanitizeMaxToolIterations(maxToolIterations);
+    console.log(`[AgentCore] Max tool iterations set to ${this.maxToolIterations}`);
   }
 
   /**
@@ -900,12 +925,12 @@ ${newlyDroppedText}`;
       let consecutiveStalls = 0; // see MAX_STALL_NUDGES
       let consecutiveVerifyFails = 0; // see MAX_VERIFY_NUDGES / _verifyDoneClaim
       // Set true at every deliberate exit from the loop below (task done, user Stop,
-      // stall budget exhausted). If the loop instead runs out of MAX_TOOL_ITERATIONS
+      // stall budget exhausted). If the loop instead runs out of this.maxToolIterations
       // while this is still false, the task was cut off mid-progress, not finished or
       // abandoned — see the check right after the loop.
       let endedWithReason = false;
 
-      while (iteration < MAX_TOOL_ITERATIONS) {
+      while (iteration < this.maxToolIterations) {
         iteration++;
 
         if (!this._isGenerating) {
@@ -997,7 +1022,7 @@ ${newlyDroppedText}`;
         if ((!currentResponse || currentResponse.length < 2) && nativeToolCalls.length === 0) {
           // A stalled connection (client's 5min stall timeout) can also land here with
           // empty text — that's not the same as the model simply producing nothing on
-          // its own, and retrying it forever would just burn through MAX_TOOL_ITERATIONS
+          // its own, and retrying it forever would just burn through this.maxToolIterations
           // silently. Count it against the same stall budget as the "stopped mid-task"
           // nudges below, and give up with a clear message once that budget is spent.
           const stalledEmpty = chatResult.stalled === true;
@@ -1201,14 +1226,14 @@ ${newlyDroppedText}`;
       }
 
       // The loop can only reach here without endedWithReason set by running out of
-      // MAX_TOOL_ITERATIONS while the model was still actively making tool-call
+      // this.maxToolIterations while the model was still actively making tool-call
       // progress each iteration (never hit a stop/done/stall-exhausted branch above).
       // Previously this silently returned the last "did X, moving on" one-liner as if
       // it were the finished answer — indistinguishable from the task actually being
       // done. Say plainly that it was cut off by the safety limit instead.
       if (!endedWithReason) {
         finalResponse = (finalResponse ? finalResponse + '\n\n' : '') +
-          `⚠️ Stopped after ${MAX_TOOL_ITERATIONS} steps in a single turn (safety limit) — the task may not be fully finished. Ask me to continue and I'll pick up from here.`;
+          `⚠️ Stopped after ${this.maxToolIterations} steps in a single turn (safety limit) — the task may not be fully finished. Ask me to continue and I'll pick up from here.`;
         conversationHistory.push({ role: 'assistant', content: finalResponse });
       }
 

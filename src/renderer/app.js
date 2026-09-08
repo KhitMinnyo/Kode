@@ -2441,6 +2441,7 @@
       const customKeyInput = document.getElementById('custom-key');
       const customContextInput = document.getElementById('custom-context-size');
       const contextInput = document.getElementById('max-context-tokens');
+      const toolIterationsInput = document.getElementById('max-tool-iterations');
       const confirmRiskyInput = document.getElementById('confirm-risky-commands');
       const firecrawlKeyInput = document.getElementById('firecrawl-key');
       const braveKeyInput = document.getElementById('brave-key');
@@ -2455,6 +2456,7 @@
       if (customKeyInput) customKeyInput.value = settings.customApiKey || '';
       if (customContextInput) customContextInput.value = String(settings.customContextSize || 32768);
       if (contextInput) contextInput.value = String(settings.maxContextTokens || 16384);
+      if (toolIterationsInput) toolIterationsInput.value = String(settings.maxToolIterations || 25);
       if (confirmRiskyInput) confirmRiskyInput.checked = settings.confirmRiskyCommands !== false;
       if (firecrawlKeyInput) firecrawlKeyInput.value = settings.firecrawlApiKey || '';
       if (braveKeyInput) braveKeyInput.value = settings.braveSearchApiKey || '';
@@ -2673,6 +2675,7 @@
     const customApiKey = document.getElementById('custom-key')?.value?.trim() || '';
     const customContextSize = parseInt(document.getElementById('custom-context-size')?.value, 10) || 32768;
     const maxContextTokens = parseInt(document.getElementById('max-context-tokens')?.value, 10) || 16384;
+    const maxToolIterations = parseInt(document.getElementById('max-tool-iterations')?.value, 10) || 25;
     const confirmRiskyCommands = document.getElementById('confirm-risky-commands')?.checked !== false;
     const firecrawlApiKey = document.getElementById('firecrawl-key')?.value?.trim() || '';
     const braveSearchApiKey = document.getElementById('brave-key')?.value?.trim() || '';
@@ -2690,6 +2693,7 @@
         customApiKey,
         customContextSize,
         maxContextTokens,
+        maxToolIterations,
         confirmRiskyCommands,
         firecrawlApiKey,
         braveSearchApiKey,

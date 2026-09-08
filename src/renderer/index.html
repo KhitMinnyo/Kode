@@ -286,6 +286,18 @@
             <span class="field-hint" id="context-window-hint">💡 Kode never exceeds your model's own context limit or this cap — raise it only if your model supports it and your machine has the RAM/VRAM to spare. Higher values use more memory per request.</span>
             <span class="field-hint field-hint-note" id="context-window-cloud-note" hidden></span>
           </div>
+          <div class="settings-field">
+            <label for="max-tool-iterations">Max Tool Iterations (steps per turn)</label>
+            <select id="max-tool-iterations">
+              <option value="10">10 — very short tasks</option>
+              <option value="25">25 — default</option>
+              <option value="50">50 — recommended for large multi-file tasks</option>
+              <option value="100">100 — long-running tasks</option>
+              <option value="200">200 — extensive refactors/audits</option>
+              <option value="500">500 — maximum</option>
+            </select>
+            <span class="field-hint">💡 How many model↔tool round-trips Kode will run before cutting a turn off with a "stopped after N steps" notice. Raise this if long multi-file tasks (or cloud models with longer useful runs) keep getting interrupted before finishing. Applies to all providers.</span>
+          </div>
         </div>
 
         <!-- Safety -->
