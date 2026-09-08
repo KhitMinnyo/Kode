@@ -16,7 +16,69 @@ const EXTERNAL_FETCH_TIMEOUT = 15000; // 15 seconds — for calls to external AP
 // zsh is the default shell on modern macOS, but Kode also ships a Linux build
 // (see package.json's `build.linux`/`build.deb` targets) where zsh usually isn't
 // installed. Pick a shell that actually exists on the platform we're running on.
-const DEFAULT_SHELL = process.platform === 'darwin' ? '/bin/zsh' : '/bin/bash';
+//
+// Windows has NEITHER of those paths — a hardcoded '/bin/bash' there throws ENOENT
+// on every single run_command/run_tests/server-start call, silently breaking the
+// agent's entire shell-command capability on Windows (this was a real bug: nothing
+// upstream ever branched on process.platform === 'win32'). Every command string the
+// model writes assumes POSIX `-c "..."` shell semantics (pipes, &&, ls, grep, rm,
+// etc. — see prompts.js), so the fix is to find an ACTUAL POSIX-compatible bash
+// rather than switching to cmd.exe/PowerShell, which use incompatible syntax and
+// would silently mis-execute (or outright reject) most of those commands. Git for
+// Windows — extremely common on Windows dev machines — ships exactly that kind of
+// bash, so look for it in its usual install locations before falling back to
+// whatever `bash` resolves to on PATH (e.g. a WSL shim, if present).
+let _cachedWindowsShellPath; // resolved once per process — the filesystem won't change mid-run
+function resolveShellPath() {
+  if (process.platform === 'darwin') return '/bin/zsh';
+  if (process.platform !== 'win32') return '/bin/bash';
+
+  if (_cachedWindowsShellPath !== undefined) return _cachedWindowsShellPath;
+
+  const candidates = [
+    process.env.ProgramFiles && path.join(process.env.ProgramFiles, 'Git', 'bin', 'bash.exe'),
+    process.env['ProgramFiles(x86)'] && path.join(process.env['ProgramFiles(x86)'], 'Git', 'bin', 'bash.exe'),
+    process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Programs', 'Git', 'bin', 'bash.exe'),
+    'C:\\Program Files\\Git\\bin\\bash.exe',
+    'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) {
+        _cachedWindowsShellPath = candidate;
+        return _cachedWindowsShellPath;
+      }
+    } catch { /* keep looking */ }
+  }
+
+  // Last resort: let the OS resolve a bare "bash" on PATH (covers a WSL bash.exe
+  // shim, or a manually-added Git Bash / MSYS2 install not in one of the usual
+  // Program Files locations above). Still far better than a hardcoded POSIX-only
+  // path that's guaranteed not to exist on this platform.
+  _cachedWindowsShellPath = 'bash';
+  return _cachedWindowsShellPath;
+}
+
+/** Test-only: clears the cached Windows shell-path resolution so a test can force resolveShellPath() to search again under different mocked conditions. */
+function _resetShellPathCacheForTests() {
+  _cachedWindowsShellPath = undefined;
+}
+
+/**
+ * Turns a raw spawn() ENOENT (couldn't find/launch the shell executable itself — as
+ * opposed to the command it ran failing) into a message that actually tells the user
+ * what to do, instead of a bare "spawn /some/path ENOENT" that reads like a random
+ * crash. Only fires for a genuine "the shell itself is missing" error; any other
+ * spawn/runtime error is returned via its own existing message untouched.
+ */
+function friendlyShellSpawnError(err) {
+  if (err && err.code === 'ENOENT' && process.platform === 'win32') {
+    return 'Could not find a shell to run commands with (looked for Git Bash and a "bash" on PATH). ' +
+      'Install Git for Windows (https://git-scm.com/downloads/win) — it ships the bash Kode needs to run shell commands — then try again.';
+  }
+  return err && err.message;
+}
 
 /**
  * fetch() has no default timeout — an unresponsive external API would otherwise hang
@@ -424,7 +486,7 @@ function runShellCommandAsync(command, { cwd, timeoutMs, maxBuffer = 2 * 1024 * 
 
     let child;
     try {
-      child = spawn(DEFAULT_SHELL, ['-c', command], {
+      child = spawn(resolveShellPath(), ['-c', command], {
         cwd: cwd || process.cwd(),
         detached: true, // own process group, so we can kill the whole pipeline below
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -599,7 +661,7 @@ async function run_command(params, projectFolder, toolContext = {}) {
     if (isServerCommand) {
       // Run server as a detached background process
       try {
-        const shell = DEFAULT_SHELL;
+        const shell = resolveShellPath();
         const child = spawn(shell, ['-c', command], {
           cwd: projectFolder || process.cwd(),
           detached: true,
@@ -671,7 +733,7 @@ async function run_command(params, projectFolder, toolContext = {}) {
         }
         return riskWarning + result;
       } catch (err) {
-        return `❌ Failed to start server: ${err.message}`;
+        return `❌ Failed to start server: ${friendlyShellSpawnError(err)}`;
       }
     }
 
@@ -717,7 +779,7 @@ async function run_command(params, projectFolder, toolContext = {}) {
     }
     return `${riskWarning}✅ Command output:\n$ ${command}\n\n${truncated}${savedNote}`;
   } catch (err) {
-    return `❌ Failed to run command: ${err.message}\n$ ${command}`;
+    return `❌ Failed to run command: ${friendlyShellSpawnError(err)}\n$ ${command}`;
   }
 }
 
@@ -1467,7 +1529,7 @@ async function run_tests(params = {}, projectFolder, toolContext = {}) {
     }
     return `✅ Tests passed:\n$ ${command}\n\n${truncated || '(no output)'}${savedNote}`;
   } catch (err) {
-    return `❌ Failed to run tests: ${err.message}\n$ ${command}`;
+    return `❌ Failed to run tests: ${friendlyShellSpawnError(err)}\n$ ${command}`;
   }
 }
 
@@ -2136,5 +2198,21 @@ Object.defineProperty(module.exports, 'READ_ONLY_TOOLS', {
 });
 Object.defineProperty(module.exports, 'isReadOnlyToolCall', {
   value: isReadOnlyToolCall,
+  enumerable: false,
+});
+
+// Same reasoning again: these are internal helpers (shell-path resolution for
+// run_command/run_tests/server-start, see the Windows Git-Bash fallback above), not
+// model-callable tools — non-enumerable so they don't show up as a 22nd/23rd tool.
+Object.defineProperty(module.exports, 'resolveShellPath', {
+  value: resolveShellPath,
+  enumerable: false,
+});
+Object.defineProperty(module.exports, '_resetShellPathCacheForTests', {
+  value: _resetShellPathCacheForTests,
+  enumerable: false,
+});
+Object.defineProperty(module.exports, 'friendlyShellSpawnError', {
+  value: friendlyShellSpawnError,
   enumerable: false,
 });

@@ -372,6 +372,117 @@ test('run_command registers detected server commands with processManager and kee
   assert.match(processManager.getLog(pid), /mock server listening on port 4321/);
 });
 
+// ─── Cross-platform shell resolution (Windows had no /bin/bash — see resolveShellPath) ──
+
+function withMockedPlatform(platform, fn) {
+  const original = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { value: platform, configurable: true });
+  try {
+    return fn();
+  } finally {
+    Object.defineProperty(process, 'platform', original);
+  }
+}
+
+test('resolveShellPath returns /bin/zsh on macOS (darwin)', () => {
+  withMockedPlatform('darwin', () => {
+    assert.equal(tools.resolveShellPath(), '/bin/zsh');
+  });
+});
+
+test('resolveShellPath returns /bin/bash on Linux (and other non-Windows, non-macOS platforms)', () => {
+  withMockedPlatform('linux', () => {
+    assert.equal(tools.resolveShellPath(), '/bin/bash');
+  });
+});
+
+test('resolveShellPath finds Git Bash at its default Program Files location on Windows', () => {
+  const originalExistsSync = fs.existsSync;
+  const originalProgramFiles = process.env.ProgramFiles;
+  const originalProgramFilesX86 = process.env['ProgramFiles(x86)'];
+  const originalLocalAppData = process.env.LOCALAPPDATA;
+  // Force the search down to just the two hardcoded literal fallback paths, so the
+  // expected match is a plain string with no path.join() involved (path.join on this
+  // test's actual host OS wouldn't necessarily produce backslashes the way it would
+  // on a real Windows machine, so asserting against the literal fallback keeps this
+  // test correct regardless of what OS it actually runs on).
+  delete process.env.ProgramFiles;
+  delete process.env['ProgramFiles(x86)'];
+  delete process.env.LOCALAPPDATA;
+  fs.existsSync = (p) => p === 'C:\\Program Files\\Git\\bin\\bash.exe';
+
+  tools._resetShellPathCacheForTests();
+  try {
+    withMockedPlatform('win32', () => {
+      assert.equal(tools.resolveShellPath(), 'C:\\Program Files\\Git\\bin\\bash.exe');
+    });
+  } finally {
+    fs.existsSync = originalExistsSync;
+    if (originalProgramFiles !== undefined) process.env.ProgramFiles = originalProgramFiles;
+    if (originalProgramFilesX86 !== undefined) process.env['ProgramFiles(x86)'] = originalProgramFilesX86;
+    if (originalLocalAppData !== undefined) process.env.LOCALAPPDATA = originalLocalAppData;
+    tools._resetShellPathCacheForTests();
+  }
+});
+
+test('resolveShellPath falls back to a bare "bash" on Windows when no known Git Bash install is found', () => {
+  const originalExistsSync = fs.existsSync;
+  fs.existsSync = () => false;
+  tools._resetShellPathCacheForTests();
+  try {
+    withMockedPlatform('win32', () => {
+      assert.equal(tools.resolveShellPath(), 'bash');
+    });
+  } finally {
+    fs.existsSync = originalExistsSync;
+    tools._resetShellPathCacheForTests();
+  }
+});
+
+test('resolveShellPath caches its Windows resolution instead of re-checking the filesystem every call', () => {
+  const originalExistsSync = fs.existsSync;
+  let existsSyncCalls = 0;
+  fs.existsSync = (p) => { existsSyncCalls++; return p === 'C:\\Program Files\\Git\\bin\\bash.exe'; };
+  tools._resetShellPathCacheForTests();
+  try {
+    withMockedPlatform('win32', () => {
+      const first = tools.resolveShellPath();
+      const callsAfterFirst = existsSyncCalls;
+      assert.ok(callsAfterFirst > 0, 'expected the first call to actually probe the filesystem');
+
+      const second = tools.resolveShellPath();
+      assert.equal(second, first);
+      assert.equal(existsSyncCalls, callsAfterFirst, 'expected the second call to reuse the cached result without re-probing the filesystem');
+    });
+  } finally {
+    fs.existsSync = originalExistsSync;
+    tools._resetShellPathCacheForTests();
+  }
+});
+
+test('friendlyShellSpawnError gives a Git-for-Windows install hint for an ENOENT on Windows', () => {
+  withMockedPlatform('win32', () => {
+    const err = new Error('spawn /bin/bash ENOENT');
+    err.code = 'ENOENT';
+    const message = tools.friendlyShellSpawnError(err);
+    assert.match(message, /Git for Windows/);
+    assert.match(message, /git-scm\.com/);
+  });
+});
+
+test('friendlyShellSpawnError leaves non-Windows and non-ENOENT errors untouched', () => {
+  withMockedPlatform('linux', () => {
+    const err = new Error('spawn /bin/bash ENOENT');
+    err.code = 'ENOENT';
+    assert.equal(tools.friendlyShellSpawnError(err), err.message);
+  });
+  withMockedPlatform('win32', () => {
+    const err = new Error('some other failure');
+    err.code = 'EACCES';
+    assert.equal(tools.friendlyShellSpawnError(err), err.message);
+  });
+});
+
 test('firecrawl_scrape fails clearly without an API key configured', async () => {
   const original = process.env.FIRECRAWL_API_KEY;
   delete process.env.FIRECRAWL_API_KEY;
