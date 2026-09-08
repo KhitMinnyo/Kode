@@ -1533,7 +1533,7 @@ body.resizing-panel {
   border-radius: 4px;
   transition: opacity 0.15s ease, background 0.2s ease, color 0.2s ease;
   font-family: inherit;
-  opacity: 0;
+  opacity: 0.55;
 }
 
 .message-bubble:hover .message-copy-btn {
