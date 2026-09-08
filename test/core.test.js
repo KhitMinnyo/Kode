@@ -382,6 +382,175 @@ test('processMessage threads setToolApiKeys-configured keys into the web_search 
   }
 });
 
+test('_scanProjectContext caches its result and reuses it (without rescanning) when the folder is unchanged', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kode-scancache-test-'));
+  fs.writeFileSync(path.join(dir, 'app.js'), 'console.log(1);');
+
+  const mockClient = { getContextSize: async () => 8192 };
+  const core = new AgentCore(mockClient, 8192, 'anthropic'); // non-ollama: no embed client, keeps this test focused on caching
+
+  const first = await core._scanProjectContext(dir);
+  assert.match(first, /app\.js/);
+  assert.ok(core._projectScanCache[dir], 'expected the scan to populate the cache');
+
+  // Prove the SECOND call is a genuine cache hit (not just a rescan landing on the
+  // same string) by counting fs.readdirSync calls: _projectScanFingerprint alone
+  // calls it once (to check whether anything changed); a full rescan additionally
+  // calls it again for the top-level listing. A cache hit should only ever incur the
+  // fingerprint's single call.
+  const realReaddirSync = fs.readdirSync;
+  let readdirCalls = 0;
+  fs.readdirSync = (...args) => { readdirCalls++; return realReaddirSync(...args); };
+  try {
+    const second = await core._scanProjectContext(dir);
+    assert.equal(second, first, 'expected the cached context to be reused verbatim');
+    assert.equal(readdirCalls, 1, 'expected only the fingerprint check to run readdirSync on a cache hit (no full rescan)');
+  } finally {
+    fs.readdirSync = realReaddirSync;
+  }
+});
+
+test('_scanProjectContext rescans once the project folder actually changes (fingerprint mismatch)', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kode-scancache-test-'));
+  fs.writeFileSync(path.join(dir, 'app.js'), 'console.log(1);');
+
+  const mockClient = { getContextSize: async () => 8192 };
+  const core = new AgentCore(mockClient, 8192, 'anthropic');
+
+  const first = await core._scanProjectContext(dir);
+  assert.match(first, /app\.js/);
+  assert.doesNotMatch(first, /new-file\.js/);
+
+  // Add a new file — the top-level fingerprint (names+mtimes) now differs, so this
+  // must be treated as a real change and rescanned rather than serving the stale cache.
+  fs.writeFileSync(path.join(dir, 'new-file.js'), 'console.log(2);');
+
+  const second = await core._scanProjectContext(dir);
+  assert.match(second, /new-file\.js/, 'expected the rescan to pick up the newly added file');
+  assert.notEqual(second, first);
+});
+
+test('_projectScanFingerprint fails soft (returns null) for a folder that does not exist', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const mockClient = { getContextSize: async () => 8192 };
+  const core = new AgentCore(mockClient, 8192, 'anthropic');
+  assert.equal(core._projectScanFingerprint('/no/such/directory/at/all', fs, path), null);
+});
+
+test('_scanProjectContext persists a project-structure memory entry with no vector when no Ollama embed client is available', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const memory = require('../src/agent/memory');
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kode-scancache-test-'));
+  fs.writeFileSync(path.join(dir, 'app.js'), 'console.log(1);');
+
+  const mockClient = { getContextSize: async () => 8192 };
+  const core = new AgentCore(mockClient, 8192, 'anthropic'); // non-ollama provider: no embed client available
+
+  await core._scanProjectContext(dir);
+
+  const saved = memory.loadMemory(dir);
+  const entry = saved.entries.find(e => e.key === 'project-structure');
+  assert.ok(entry, 'expected a project-structure memory entry to be saved');
+  assert.match(entry.value, /app\.js/);
+  assert.deepEqual(entry.tags, ['project-analysis']);
+  assert.equal(entry.vector, null);
+});
+
+test('_scanProjectContext embeds the persisted project-structure entry when an Ollama embed client is available', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const memory = require('../src/agent/memory');
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kode-scancache-test-'));
+  fs.writeFileSync(path.join(dir, 'app.js'), 'console.log(1);');
+
+  let embedCalls = 0;
+  const mockClient = {
+    getContextSize: async () => 8192,
+    embed: async () => { embedCalls++; return [[0.1, 0.2, 0.3]]; },
+  };
+  const core = new AgentCore(mockClient, 8192, 'ollama');
+
+  await core._scanProjectContext(dir);
+
+  assert.equal(embedCalls, 1, 'expected the project scan to be embedded exactly once');
+  const saved = memory.loadMemory(dir);
+  const entry = saved.entries.find(e => e.key === 'project-structure');
+  assert.ok(entry);
+  assert.deepEqual(entry.vector, [0.1, 0.2, 0.3]);
+});
+
+test('_scanProjectContext still saves (without a vector) if embedding the scan throws', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const memory = require('../src/agent/memory');
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kode-scancache-test-'));
+  fs.writeFileSync(path.join(dir, 'app.js'), 'console.log(1);');
+
+  const mockClient = {
+    getContextSize: async () => 8192,
+    embed: async () => { throw new Error('embedding service unreachable'); },
+  };
+  const core = new AgentCore(mockClient, 8192, 'ollama');
+
+  // Should not throw or block the scan itself.
+  const context = await core._scanProjectContext(dir);
+  assert.match(context, /app\.js/);
+
+  const saved = memory.loadMemory(dir);
+  const entry = saved.entries.find(e => e.key === 'project-structure');
+  assert.ok(entry, 'expected the entry to still be saved despite the embedding failure');
+  assert.equal(entry.vector, null);
+});
+
+test('processMessage auto-recall prefers semantic memory search over keyword search, catching a rephrased query keyword search would miss', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const memory = require('../src/agent/memory');
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kode-semrecall-test-'));
+  // Seed a memory entry whose key/value/tags share NO words with the question below —
+  // keyword search (word-overlap) would find nothing, so only semantic search (cosine
+  // similarity over the fake embedding vectors) can surface it.
+  memory.upsertMemoryEntry(dir, 'auth-approach', 'We use JWT bearer tokens for API authentication.', ['architecture'], [1, 0, 0]);
+
+  let capturedMessages = null;
+  const mockClient = {
+    getContextSize: async () => 8192,
+    abort() {},
+    embed: async () => [[1, 0, 0.01]], // closest to the seeded vector above
+    chat: async (model, messages) => {
+      capturedMessages = messages;
+      return { text: 'Sure.', toolCalls: [] };
+    },
+  };
+
+  const core = new AgentCore(mockClient, 8192, 'ollama');
+  await core.processMessage('how do users log in to the api?', 'test-model', [], () => {}, () => {}, dir, () => {});
+
+  assert.ok(capturedMessages, 'expected chat() to have been called');
+  const lastUserMessage = [...capturedMessages].reverse().find(m => m.role === 'user');
+  assert.ok(lastUserMessage, 'expected a user message in the built context');
+  assert.match(lastUserMessage.content, /Relevant project memory/);
+  assert.match(lastUserMessage.content, /JWT bearer tokens/);
+});
+
 test('_buildContextMessages falls back to a tool-name note when summarization fails', async () => {
   const mockClient = {
     getContextSize: async () => 2048,

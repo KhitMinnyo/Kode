@@ -4,6 +4,7 @@ const { getSystemPrompt, getAvailableToolNames, supportsNativeToolCalling } = re
 const tools = require('./tools');
 const memory = require('./memory');
 const contextCache = require('./contextCache');
+const embeddings = require('./embeddings');
 const { TOOL_SCHEMAS } = tools;
 
 // Allow multi-step task execution. Bumped from 15: with write_plan encouraging explicit
@@ -248,6 +249,7 @@ class AgentCore {
     this._contextSizeCache = {};  // model → context_size cache
     this.maxContextCap = maxContextCap; // user-configurable ceiling, see setMaxContextCap()
     this._contextSummaryCache = {};  // conversation fingerprint → { droppedCount, summary }
+    this._projectScanCache = {};     // projectFolder → { fingerprint, context } (see _scanProjectContext)
     // Which backend `this.ollamaClient` currently points at: 'ollama' | 'deepseek' |
     // 'openai' | 'anthropic'. Despite the property name (kept for backward
     // compatibility), it holds whichever client main.js's getActiveClient() selected.
@@ -773,6 +775,19 @@ ${newlyDroppedText}`;
     const path = require('path');
 
     try {
+      // Cheap fingerprint of the top-level tree (names + mtimes) so a project-level
+      // request only actually re-reads files when something changed — a plain "what's
+      // next / continue" on an unchanged project reuses the cached scan instead of
+      // re-listing and re-reading the same files every single turn.
+      const fingerprint = this._projectScanFingerprint(projectFolder, fs, path);
+      if (fingerprint) {
+        const cached = this._projectScanCache[projectFolder];
+        if (cached && cached.fingerprint === fingerprint) {
+          console.log('[AgentCore] Reusing cached project scan (unchanged).');
+          return cached.context;
+        }
+      }
+
       // List top-level files
       const entries = fs.readdirSync(projectFolder, { withFileTypes: true });
       const files = [];
@@ -832,10 +847,69 @@ ${newlyDroppedText}`;
         } catch { /* skip */ }
       }
 
+      if (fingerprint) {
+        this._projectScanCache[projectFolder] = { fingerprint, context };
+      }
+
+      // Persist a compact structure note to long-term memory so a FUTURE session can
+      // recall the layout instead of re-scanning from scratch. Only runs when the scan
+      // actually changed (fingerprint mismatch above), so it never churns memory on
+      // every message. Never blocks/fails the scan itself.
+      await this._saveProjectScanToMemory(projectFolder, context);
+
       return context;
     } catch (err) {
       console.warn('[AgentCore] Failed to scan project:', err.message);
       return null;
+    }
+  }
+
+  /**
+   * Builds a cheap, stable fingerprint of a project folder's top-level entries (type +
+   * name + mtime) so _scanProjectContext can tell "nothing changed, reuse the cached
+   * scan" from "something changed, rescan". Skips dotfiles/node_modules, sorts for
+   * stability, and returns null on any error (which just forces a rescan).
+   */
+  _projectScanFingerprint(projectFolder, fs, path) {
+    try {
+      const entries = fs.readdirSync(projectFolder, { withFileTypes: true });
+      const parts = [];
+      for (const entry of entries) {
+        if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+        try {
+          const stat = fs.statSync(path.join(projectFolder, entry.name));
+          parts.push(`${entry.isDirectory() ? 'd' : 'f'}:${entry.name}:${Math.round(stat.mtimeMs)}`);
+        } catch { /* skip entries we can't stat */ }
+      }
+      return parts.sort().join('|');
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Best-effort persistence of the current project scan into long-term memory under a
+   * stable `project-structure` key. Mirrors save_memory's embedding behavior (embedding
+   * only available on the Ollama provider) but never throws — losing this note just
+   * means the next session re-scans, which is exactly what happened before, so it's a
+   * pure improvement.
+   */
+  async _saveProjectScanToMemory(projectFolder, context) {
+    try {
+      const key = 'project-structure';
+      let vector = null;
+      const client = this.provider === 'ollama' ? this.ollamaClient : null;
+      if (client && typeof client.embed === 'function') {
+        try {
+          const [computed] = await client.embed(embeddings.DEFAULT_EMBED_MODEL, [`${key} ${context}`]);
+          if (Array.isArray(computed)) vector = computed;
+        } catch (err) {
+          console.warn('[AgentCore] Failed to embed project scan, saving without a vector:', err.message);
+        }
+      }
+      memory.upsertMemoryEntry(projectFolder, key, context, ['project-analysis'], vector);
+    } catch (err) {
+      console.warn('[AgentCore] Failed to persist project scan to memory:', err.message);
     }
   }
 
@@ -902,7 +976,22 @@ ${newlyDroppedText}`;
       // doesn't add noise to every single message.
       if (projectFolder) {
         try {
-          const recalled = memory.searchMemory(projectFolder, userMessage, 3);
+          // Meaning-first recall: prefer embedding/semantic search (which catches
+          // rephrasings and non-Latin queries like Burmese that keyword overlap misses),
+          // then fall back to keyword overlap. Only injects when something actually
+          // matches, so it doesn't add noise to every single message.
+          let recalled = [];
+          const client = this.provider === 'ollama' ? this.ollamaClient : null;
+          if (client && typeof client.embed === 'function' && userMessage.trim()) {
+            try {
+              recalled = await memory.semanticSearchMemory(projectFolder, client, userMessage, 5);
+            } catch (err) {
+              console.warn('[AgentCore] Semantic auto-recall failed, falling back to keyword:', err.message);
+            }
+          }
+          if (recalled.length === 0) {
+            recalled = memory.searchMemory(projectFolder, userMessage, 3);
+          }
           if (recalled.length > 0) {
             enrichedMessage = `${enrichedMessage}\n\n[Relevant project memory — recalled automatically]\n${memory.formatMemoryEntries(recalled)}`;
             console.log(`[AgentCore] Auto-recalled ${recalled.length} memory entr${recalled.length === 1 ? 'y' : 'ies'}`);

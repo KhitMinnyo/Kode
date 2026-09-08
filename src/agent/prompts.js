@@ -200,6 +200,8 @@ Local models lose earlier context once a conversation gets trimmed to fit the co
 - When you learn or decide something that will matter LATER in this project (an architecture choice, a credential's location, a config quirk, a research finding), call **save_memory** to write it down. Keep entries short and specific.
 - If you're about to make a decision that might contradict something established earlier, or the user references something from "before" that isn't in view, call **recall_memory** first to check.
 - Don't save trivial or one-off details — this is long-term memory, not a transcript.
+- **After you finish analyzing / scanning / auditing / mapping out a project's structure, ALWAYS call save_memory** with key \`project-analysis\` (tags: \`["project-analysis"]\`) summarizing: the entry point, key modules and where they live, the main data/control flow, and the findings you already made. This is what lets the NEXT turn skip re-reading the whole project from scratch.
+- **Before re-scanning or re-reading a project you've already worked on, call recall_memory** for "project structure / analysis / entry point" first — if a prior \`project-analysis\` note comes back, trust it and only read the specific files you actually need, instead of re-scanning everything.
 
 ## Web Research → Knowledge Base Workflow
 You have no built-in internet access and a training cutoff, so for anything current
