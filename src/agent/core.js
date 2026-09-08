@@ -3,6 +3,7 @@
 const { getSystemPrompt, getAvailableToolNames, supportsNativeToolCalling } = require('./prompts');
 const tools = require('./tools');
 const memory = require('./memory');
+const plan = require('./plan');
 const contextCache = require('./contextCache');
 const embeddings = require('./embeddings');
 const { TOOL_SCHEMAS } = tools;
@@ -661,8 +662,12 @@ ${newlyDroppedText}`;
 
   /**
    * Re-verifies what this turn actually wrote to disk instead of trusting a "✅ Done"
-   * claim at face value — see the call site in processMessage for why. Two checks,
+   * claim at face value — see the call site in processMessage for why. Three checks,
    * cheapest first:
+   *   0. A persisted write_plan (agent/plan.js) with any step still incomplete — the
+   *      plan file only exists on disk while unfinished, so its mere presence is a
+   *      direct sign the task isn't done. Runs regardless of whether any file was
+   *      touched this turn (the other two checks below only run when one was).
    *   1. Re-run quickSyntaxCheck (tools.js) on every file this turn successfully
    *      created/edited/patched. Cheap (milliseconds), and catches the exact class of
    *      mistake local models make most (mismatched braces, bad escaping) even if the
@@ -672,11 +677,31 @@ ${newlyDroppedText}`;
    *      suite (bounded to at most MAX_VERIFY_NUDGES + 1 runs per turn — see the doc
    *      comment on the test-suite check below for why re-running isn't wasteful here).
    * @returns {Promise<string|null>} a description of the problem, or null if there's
-   *   nothing to verify (no files touched this turn) or everything checks out.
+   *   nothing to verify (no active plan, no files touched this turn) or everything
+   *   checks out.
    */
   async _verifyDoneClaim(allToolResults, projectFolder) {
     if (!projectFolder) return null;
     const path = require('path');
+
+    // Ground-truth check #0 (cheapest, and — unlike the syntax/test checks below —
+    // independent of whether any files were touched THIS turn): a persisted plan
+    // (agent/plan.js) only stays on disk while at least one of its steps is still
+    // incomplete — write_plan clears the file the moment every step is marked done
+    // (see write_plan in tools.js / plan.isPlanComplete). So a "✅ Done" claim while a
+    // plan file still exists on disk is a direct, structural sign the task isn't
+    // actually finished. This specifically catches the case the checks below can't:
+    // a turn that claims done without creating/editing/patching any file this turn
+    // (e.g. the model just stopped producing tool calls partway through a plan, or
+    // only did non-file steps) — previously that fell straight through to
+    // `touchedFiles.size === 0 return null` below with no verification at all.
+    const activePlan = plan.loadPlan(projectFolder);
+    if (activePlan) {
+      const { text } = plan.formatPlan(activePlan.steps);
+      return `Your own saved plan (write_plan) still shows unfinished steps:\n${text}\n\n` +
+        `Either keep going and finish them now, or — if the plan is stale/no longer accurate — ` +
+        `call write_plan again with the corrected steps before declaring the task done.`;
+    }
 
     // Files this turn actually wrote successfully. A plain Q&A turn, or one that only
     // ran read-only tools (search_files, read_file, git_status, ...), has nothing here

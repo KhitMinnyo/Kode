@@ -1037,7 +1037,85 @@ test('processMessage does not add a safety-limit message when the task finishes 
 
 // ─── Post-"✅ Done" verification (_verifyDoneClaim) ──────────────────────────
 
-test('processMessage nudges when a syntax check on a just-written file fails after "✅ Done", then accepts once fixed', async () => {
+test('_verifyDoneClaim flags an unfinished saved plan even when no file was touched this turn', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const planMod = require('../src/agent/plan');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kode-test-'));
+
+  planMod.savePlan(dir, [
+    { text: 'Read the auth module', status: 'done' },
+    { text: 'Add rate limiting', status: 'pending' },
+  ]);
+
+  const mockClient = { getContextSize: async () => 8192 };
+  const core = new AgentCore(mockClient, 8192, 'ollama');
+
+  // allToolResults is empty — this is exactly the case the other checks in
+  // _verifyDoneClaim can't catch (they bail out immediately when no file was
+  // touched), which is why the plan check has to run unconditionally, first.
+  const issue = await core._verifyDoneClaim([], dir);
+  assert.ok(issue, 'expected an unfinished plan to be flagged as a problem');
+  assert.match(issue, /unfinished steps/i);
+  assert.match(issue, /Add rate limiting/);
+});
+
+test('_verifyDoneClaim returns null when there is no saved plan at all', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kode-test-'));
+
+  const mockClient = { getContextSize: async () => 8192 };
+  const core = new AgentCore(mockClient, 8192, 'ollama');
+  assert.equal(await core._verifyDoneClaim([], dir), null);
+});
+
+test('processMessage nudges a premature "✅ Done" claim when the saved plan still has pending steps, with no file touched that turn', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const planMod = require('../src/agent/plan');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kode-test-'));
+
+  planMod.savePlan(dir, [
+    { text: 'Read the auth module', status: 'done' },
+    { text: 'Add rate limiting', status: 'pending' },
+  ]);
+
+  let chatCallCount = 0;
+  let secondCallMessages = null;
+  const mockClient = {
+    getContextSize: async () => 8192,
+    abort() {},
+    chat: async (model, messages) => {
+      chatCallCount++;
+      if (chatCallCount === 1) {
+        // Declares done with zero tool calls this turn — nothing for the
+        // syntax/test checks to look at, only the plan-completeness check can catch this.
+        return { text: '✅ Done: all set.', toolCalls: [] };
+      }
+      secondCallMessages = messages;
+      // Plain reply, no new "✅ Done" claim — the exempted "ordinary reply, nothing
+      // to finish" path, so the turn ends cleanly right after this without looping.
+      return { text: 'Right, let me actually wire up rate limiting next time I get to it.', toolCalls: [] };
+    },
+  };
+
+  const core = new AgentCore(mockClient, 8192, 'ollama');
+  const result = await core.processMessage('finish the plan', 'test-model', [], () => {}, () => {}, dir, () => {});
+
+  assert.equal(chatCallCount, 2, 'expected exactly one nudge round trip');
+  assert.ok(secondCallMessages, 'expected a second chat() call after the nudge');
+  const nudgeMessage = secondCallMessages[secondCallMessages.length - 1];
+  assert.equal(nudgeMessage.role, 'user');
+  assert.match(nudgeMessage.content, /unfinished steps/i);
+  assert.match(nudgeMessage.content, /Add rate limiting/);
+  assert.equal(result.hitIterationCeiling, false);
+});
+
+test("processMessage nudges when a syntax check on a just-written file fails after \"✅ Done\", then accepts once fixed", async () => {
   const fs = require('node:fs');
   const os = require('node:os');
   const path = require('node:path');
