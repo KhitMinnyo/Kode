@@ -1,6 +1,6 @@
 'use strict';
 
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('kode', {
   /**
@@ -29,10 +29,13 @@ contextBridge.exposeInMainWorld('kode', {
    * @param {Array<{role: string, content: string}>} history - Conversation history
    * @param {string} [projectPath] - The tab's own active project folder (falls
    *   back to the legacy global active project if omitted)
+   * @param {Array<{data: string, mediaType: string, name?: string, path?: string}>} [images]
+   *   Images attached to this message (pasted screenshots, dropped/attached image
+   *   files), base64-encoded. Sent as real image content to vision-capable models.
    * @returns {Promise<{response: string, toolResults: Array}>}
    */
-  sendMessage: (tabId, model, message, history, projectPath) => {
-    return ipcRenderer.invoke('send-message', { tabId, model, message, history, projectPath });
+  sendMessage: (tabId, model, message, history, projectPath, images) => {
+    return ipcRenderer.invoke('send-message', { tabId, model, message, history, projectPath, images });
   },
 
   /**
@@ -193,6 +196,34 @@ contextBridge.exposeInMainWorld('kode', {
    * @returns {Promise<{success: boolean, type?: 'file'|'folder', content?: string, error?: string}>}
    */
   getAttachmentContent: (attachedPath) => ipcRenderer.invoke('get-attachment-content', attachedPath),
+
+  /**
+   * Save an image pasted or dropped into the chat box. Clipboard images exist only as
+   * bytes, so they're written into the app's data folder (never the user's project)
+   * and returned with the base64 the model will actually receive.
+   * @param {Uint8Array} bytes
+   * @param {string} mediaType - e.g. 'image/png'
+   * @param {string} [name] - Suggested file name, if the clipboard offered one
+   * @returns {Promise<{success: boolean, path?: string, name?: string, mediaType?: string, data?: string, error?: string}>}
+   */
+  savePastedImage: (bytes, mediaType, name) => ipcRenderer.invoke('save-pasted-image', { bytes, mediaType, name }),
+
+  /**
+   * The real filesystem path of a File from a paste or drag-and-drop.
+   *
+   * Electron removed the non-standard `File.path` property in v32, so this is the
+   * only way a dropped/pasted file can be resolved to a path the agent's tools can
+   * open — and it has to happen here in the preload, where `webUtils` lives.
+   * @param {File} file
+   * @returns {string} The absolute path, or '' for a file with no path (clipboard image data)
+   */
+  getPathForFile: (file) => {
+    try {
+      return webUtils.getPathForFile(file) || '';
+    } catch {
+      return '';
+    }
+  },
 
   // ─── Settings APIs ──────────────────────────────────────────────────────────
 

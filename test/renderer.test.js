@@ -93,6 +93,8 @@ async function bootApp() {
     stopGenerationCalls: [],
     closeTabCalls: [],
     respondAskUserCalls: [],
+    savePastedImageCalls: [],
+    getAttachmentContentCalls: [],
     onStreamToken: null,
     onToolExecution: null,
     onStreamEnd: null,
@@ -119,9 +121,26 @@ async function bootApp() {
     saveChat: async () => ({ success: true }),
     updateChatTitle: async () => ({ success: true }),
     setActiveChat: async () => ({ success: false }),
-    sendMessage: async (tabId, model, message, history, projectPath) => {
-      captured.sendMessageCalls.push({ tabId, model, message, history, projectPath });
+    sendMessage: async (tabId, model, message, history, projectPath, images) => {
+      captured.sendMessageCalls.push({ tabId, model, message, history, projectPath, images });
       return { success: true };
+    },
+    savePastedImage: async (bytes, mediaType, name) => {
+      captured.savePastedImageCalls.push({ byteLength: bytes.length, mediaType, name });
+      return {
+        success: true,
+        path: `/tmp/pasted-attachments/2026-01-01-${name || "pasted"}.png`,
+        name: `${name || "pasted"}.png`,
+        mediaType: mediaType || "image/png",
+        data: "aGVsbG8=",
+      };
+    },
+    // Mirrors preload: a clipboard image has no path on disk, a copied file does.
+    getPathForFile: (file) => file._fakePath || "",
+    getAttachmentContent: async (attachedPath) => {
+      captured.getAttachmentContentCalls.push(attachedPath);
+      return { success: true, type: "file", content: `[Attached file: ${attachedPath}]
+contents` };
     },
     stopGeneration: async (tabId) => {
       captured.stopGenerationCalls.push(tabId);
@@ -406,4 +425,84 @@ test('a failed send-message clears the status bar, the elapsed timer and the tok
     await new Promise((r) => setTimeout(r, 1200));
     assert.equal(document.getElementById('elapsed-timer').textContent, '');
   });
+});
+
+/**
+ * Regression: the chat box had no paste handler at all, so a screenshot on the
+ * clipboard or a file copied in Finder did nothing — only plain text ever got in.
+ */
+test('pasting a screenshot into the chat box stages it and sends it as an image', async (t) => {
+  const { dom, window, document, captured } = await bootApp();
+  after(() => dom.window.close());
+  const $ = (sel) => document.querySelector(sel);
+
+  const input = $('#message-input');
+  const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const file = new window.File([pngBytes], 'Screenshot 2026-09-11.png', { type: 'image/png' });
+
+  /** jsdom has no ClipboardEvent, so drive the handler with the shape it reads. */
+  function pasteEvent(items) {
+    const evt = new window.Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(evt, 'clipboardData', { value: { items } });
+    return evt;
+  }
+
+  await t.test('a pasted image becomes a staged chip with a thumbnail', async () => {
+    input.dispatchEvent(pasteEvent([{ kind: 'file', type: 'image/png', getAsFile: () => file }]));
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.equal(captured.savePastedImageCalls.length, 1, 'clipboard bytes must be written to disk');
+    assert.equal(captured.savePastedImageCalls[0].mediaType, 'image/png');
+
+    const row = document.getElementById('attachments-row');
+    assert.equal(row.hidden, false);
+    assert.ok(row.querySelector('img.attachment-chip-thumb'), 'an image chip shows the image itself');
+  });
+
+  await t.test('sending carries the image as image data, not as text', async () => {
+    input.value = 'what is this dialog?';
+    $('#send-btn').click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const call = captured.sendMessageCalls[0];
+    assert.equal(call.images.length, 1);
+    assert.equal(call.images[0].data, 'aGVsbG8=');
+    assert.equal(call.images[0].mediaType, 'image/png');
+    // The model also gets told where the file landed, so its own tools can reach it
+    // and a model without vision still knows what it was handed.
+    assert.match(call.message, /what is this dialog\?/);
+    assert.match(call.message, /\[Attached image: .*\.png\]/);
+  });
+
+  await t.test('the tray is emptied once the message is sent', () => {
+    assert.equal(document.getElementById('attachments-row').hidden, true);
+  });
+
+  await t.test('pasting plain text is left completely alone', async () => {
+    const evt = pasteEvent([{ kind: 'string', type: 'text/plain', getAsFile: () => null }]);
+    input.dispatchEvent(evt);
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.equal(evt.defaultPrevented, false, 'a text paste must keep its default behaviour');
+    assert.equal(captured.savePastedImageCalls.length, 1, 'no new image was saved');
+    assert.equal(document.getElementById('attachments-row').hidden, true);
+  });
+});
+
+test('dropping a file from Finder attaches it by path rather than re-reading its bytes', async (t) => {
+  const { dom, window, document, captured } = await bootApp();
+  after(() => dom.window.close());
+
+  const file = new window.File([new Uint8Array([1, 2, 3])], 'notes.md', { type: 'text/markdown' });
+  file._fakePath = '/Users/someone/Documents/notes.md'; // what webUtils.getPathForFile returns
+
+  const dropZone = document.querySelector('.main-content');
+  const evt = new window.Event('drop', { bubbles: true, cancelable: true });
+  Object.defineProperty(evt, 'dataTransfer', { value: { files: [file], types: ['Files'] } });
+  dropZone.dispatchEvent(evt);
+  await new Promise((r) => setTimeout(r, 50));
+
+  assert.equal(evt.defaultPrevented, true, 'the drop must be swallowed — Electron would otherwise navigate to the file');
+  assert.deepEqual(captured.getAttachmentContentCalls, ['/Users/someone/Documents/notes.md']);
+  assert.match(document.getElementById('attachments-row').textContent, /notes\.md/);
 });

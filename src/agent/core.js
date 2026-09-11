@@ -6,6 +6,14 @@ const memory = require('./memory');
 const plan = require('./plan');
 const contextCache = require('./contextCache');
 const embeddings = require('./embeddings');
+const {
+  IMAGE_TOKEN_ESTIMATE,
+  textOf,
+  imagePartsOf,
+  buildContent,
+  withText,
+  toPlainText,
+} = require('../shared/messageContent');
 const { TOOL_SCHEMAS } = tools;
 
 // Allow multi-step task execution. Bumped from 15: with write_plan encouraging explicit
@@ -100,6 +108,19 @@ function estimateTokens(text) {
   // before. Non-ASCII: ~1.2 chars/token, much closer to how BPE tokenizers actually
   // handle scripts they weren't heavily trained on.
   return Math.ceil(asciiChars / 3.5 + nonAsciiChars / 1.2);
+}
+
+/**
+ * estimateTokens for a whole message's content, which since image attachments is no
+ * longer always a string: a message can be an array of text/image parts (see
+ * src/shared/messageContent.js). Text is estimated as before; each image adds a flat
+ * allowance, because an image's real context cost is invisible to a character count —
+ * left uncounted, a couple of screenshots would silently eat a context budget that
+ * _buildContextMessages believed it was respecting.
+ */
+function estimateMessageTokens(content) {
+  if (typeof content === 'string') return estimateTokens(content);
+  return estimateTokens(textOf(content)) + imagePartsOf(content).length * IMAGE_TOKEN_ESTIMATE;
 }
 
 /**
@@ -462,7 +483,7 @@ ${newlyDroppedText}`;
 
     for (let i = conversationHistory.length - 1; i >= 0; i--) {
       const msg = conversationHistory[i];
-      let msgTokens = estimateTokens(msg.content);
+      let msgTokens = estimateMessageTokens(msg.content);
 
       if (msgTokens > budget) {
         // If this is the most recent message (must include), truncate it. The old
@@ -472,17 +493,22 @@ ${newlyDroppedText}`;
         // overflow the budget. Binary-search the longest prefix that actually fits
         // per estimateTokens instead.
         if (selectedMessages.length === 0) {
-          const content = msg.content;
+          // Only the TEXT is truncated. Slicing multimodal content as if it were a
+          // string would corrupt it (and half an image is worth nothing anyway), so
+          // images are carried over whole and the text is trimmed around them.
+          const text = textOf(msg.content);
+          const imageAllowance = imagePartsOf(msg.content).length * IMAGE_TOKEN_ESTIMATE;
+          const textBudget = Math.max(0, budget - imageAllowance);
           let lo = 0;
-          let hi = content.length;
+          let hi = text.length;
           while (lo < hi) {
             const mid = Math.ceil((lo + hi) / 2);
-            if (estimateTokens(content.slice(0, mid)) > budget) hi = mid - 1;
+            if (estimateTokens(text.slice(0, mid)) > textBudget) hi = mid - 1;
             else lo = mid;
           }
           selectedMessages.unshift({
             role: msg.role,
-            content: content.slice(0, lo) + '\n... (truncated)',
+            content: withText(msg.content, text.slice(0, lo) + '\n... (truncated)'),
           });
         }
         droppedCount = i + 1;
@@ -525,7 +551,7 @@ ${newlyDroppedText}`;
         const newlyDropped = conversationHistory.slice(sinceIndex, droppedCount);
 
         if (newlyDropped.length > 0) {
-          const newlyDroppedFullText = newlyDropped.map(m => `[${m.role}] ${m.content}`).join('\n');
+          const newlyDroppedFullText = newlyDropped.map(m => `[${m.role}] ${toPlainText(m.content)}`).join('\n');
           // Save the FULL text before it's lossily reduced below — see
           // _cacheDroppedHistoryToScratch's doc comment for why.
           scratchNote = this._cacheDroppedHistoryToScratch(projectFolder, newlyDroppedFullText);
@@ -554,8 +580,9 @@ ${newlyDroppedText}`;
         const droppedMessages = conversationHistory.slice(0, droppedCount);
         const completedTools = [];
         for (const msg of droppedMessages) {
-          if (msg.role === 'user' && msg.content.startsWith('Tool results:')) {
-            const toolMatches = msg.content.match(/\[Tool Result: (\w+)\]/g);
+          const msgText = toPlainText(msg.content);
+          if (msg.role === 'user' && msgText.startsWith('Tool results:')) {
+            const toolMatches = msgText.match(/\[Tool Result: (\w+)\]/g);
             if (toolMatches) {
               toolMatches.forEach(m => completedTools.push(m.replace('[Tool Result: ', '').replace(']', '')));
             }
@@ -973,7 +1000,7 @@ ${newlyDroppedText}`;
    *   src/agent/tools.js's ask_user and main.js's makeAskUserCallback.
    * @returns {Promise<{response: string, toolResults: Array<{tool: string, params: object, result: string}>, hitIterationCeiling: boolean}>}
    */
-  async processMessage(userMessage, model, conversationHistory, onToken = () => {}, onToolExecution = () => {}, projectFolder = null, onStatus = () => {}, onConfirmCommand = null, onAskUser = null) {
+  async processMessage(userMessage, model, conversationHistory, onToken = () => {}, onToolExecution = () => {}, projectFolder = null, onStatus = () => {}, onConfirmCommand = null, onAskUser = null, images = []) {
     if (!userMessage || typeof userMessage !== 'string') {
       throw new Error('User message is required');
     }
@@ -1038,8 +1065,19 @@ ${newlyDroppedText}`;
         }
       }
 
-      // Add user message to history
-      conversationHistory.push({ role: 'user', content: enrichedMessage });
+      // Add user message to history.
+      //
+      // With images attached (a pasted screenshot, a dropped PNG) the content becomes
+      // a provider-neutral array of text/image parts instead of a plain string; each
+      // client converts that to its own wire shape on the way out. Without images it
+      // stays exactly the string it has always been, so nothing changes for a
+      // text-only turn. Note the enrichment above (project context, memory recall)
+      // applies to the TEXT part — the image travels alongside it, not inside it.
+      const attachedImages = Array.isArray(images) ? images : [];
+      conversationHistory.push({ role: 'user', content: buildContent(enrichedMessage, attachedImages) });
+      if (attachedImages.length > 0) {
+        console.log(`[AgentCore] Attached ${attachedImages.length} image(s) to this turn`);
+      }
 
       // Build messages array with system prompt prepended (model-aware for security
       // models, and message-aware so the large pentest/red-team playbook is only
@@ -1080,7 +1118,7 @@ ${newlyDroppedText}`;
         // Right-size num_ctx to what this request actually needs instead of always
         // requesting the model's full (capped) window — smaller KV cache, faster prompt
         // processing, less RAM/VRAM pressure on local hardware.
-        const neededTokens = messages.reduce((s, m) => s + estimateTokens(m.content), 0);
+        const neededTokens = messages.reduce((s, m) => s + estimateMessageTokens(m.content), 0);
         const numCtx = bucketNumCtx(neededTokens, maxContextSize);
 
         // Native Ollama function-calling is only reliable on a handful of model families;
@@ -1436,6 +1474,7 @@ module.exports = AgentCore;
 module.exports._testUtils = {
   bucketNumCtx,
   estimateTokens,
+  estimateMessageTokens,
   parseToolCalls,
   tryParseToolJSON,
   convertNativeToolCalls,

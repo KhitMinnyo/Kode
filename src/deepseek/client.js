@@ -337,6 +337,25 @@ class DeepSeekClient {
    * @param {function(object): void} [opts.onProgress] - Progress callback: { event, elapsed, tokens, tokensPerSec }
    * @returns {Promise<string>} - The full response text
    */
+
+  /**
+   * Converts Kode's provider-neutral multimodal content into OpenAI's `content`
+   * parts (DeepSeek's API is OpenAI-compatible, including for image input on its
+   * vision models). Plain-string content — every text-only turn — passes through
+   * untouched. See src/shared/messageContent.js.
+   */
+  _normalizeMessages(messages) {
+    return messages.map((msg) => {
+      if (!Array.isArray(msg.content)) return msg;
+      const parts = msg.content.map((part) => (
+        part && part.type === 'image'
+          ? { type: 'image_url', image_url: { url: `data:${part.mediaType || 'image/png'};base64,${part.data}` } }
+          : { type: 'text', text: (part && part.text) || '' }
+      ));
+      return { ...msg, content: parts };
+    });
+  }
+
   async chat(model, messages, onChunk = () => {}, opts = {}) {
     if (!model || typeof model !== 'string') {
       throw new Error('Model name is required');
@@ -360,7 +379,7 @@ class DeepSeekClient {
 
     const requestBody = {
       model,
-      messages,
+      messages: this._normalizeMessages(messages),
       stream: true,
       temperature: opts.temperature !== undefined ? opts.temperature : 0.7,
       // DeepSeek's docs don't publish a numeric default, and v4 models support up to

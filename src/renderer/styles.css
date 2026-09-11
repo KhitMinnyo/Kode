@@ -1807,6 +1807,25 @@ body.resizing-panel {
   flex-shrink: 0;
 }
 
+/* Pasted/attached images preview themselves in their chip — a thumbnail identifies a
+   screenshot at a glance, where its generated filename can't. */
+.attachment-chip-thumb {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  object-fit: cover;
+  border-radius: 3px;
+  border: 1px solid var(--border-glass);
+}
+
+/* Whole-chat drop target: dragging files anywhere over the conversation shows where
+   they will land. */
+.main-content.drag-over {
+  outline: 2px dashed var(--accent-primary);
+  outline-offset: -8px;
+  background: color-mix(in srgb, var(--accent-primary) 6%, transparent);
+}
+
 .attachment-chip-name {
   overflow: hidden;
   text-overflow: ellipsis;

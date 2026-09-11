@@ -852,6 +852,129 @@
       const removeBtn = e.target.closest('.attachment-chip-remove');
       if (removeBtn) removeAttachment(removeBtn.dataset.id);
     });
+
+    setupPasteAndDrop();
+  }
+
+  /**
+   * Paste and drag-and-drop into the chat box — the other two ways people expect to
+   * attach something, neither of which existed: the input had no paste handler at
+   * all, so a copied file or a screenshot on the clipboard silently did nothing and
+   * only plain text ever made it in.
+   *
+   * Both routes end up in stageAttachedFile(), because the two cases they produce are
+   * the same two: a file that exists on disk (copied in Finder/Explorer, or dragged
+   * from a folder) which can be staged by path like any other attachment, and raw
+   * image bytes from the clipboard with no path anywhere, which have to be written
+   * out before they can be attached at all.
+   */
+  function setupPasteAndDrop() {
+    const inputEl = messageInput();
+    if (inputEl) {
+      inputEl.addEventListener('paste', async (e) => {
+        const items = e.clipboardData ? Array.from(e.clipboardData.items || []) : [];
+        const fileItems = items.filter((item) => item.kind === 'file');
+        // No files on the clipboard — an ordinary text paste. Left entirely alone, so
+        // typing and pasting text behaves exactly as it always has.
+        if (fileItems.length === 0) return;
+
+        e.preventDefault();
+        for (const item of fileItems) {
+          const file = item.getAsFile();
+          if (file) await stageAttachedFile(file);
+        }
+      });
+    }
+
+    // Dropping a file anywhere in an Electron window makes the window NAVIGATE to that
+    // file by default, replacing the whole app with it. Suppressing that at the window
+    // level is what makes drag-and-drop safe to offer at all.
+    window.addEventListener('dragover', (e) => e.preventDefault());
+    window.addEventListener('drop', (e) => e.preventDefault());
+
+    const dropZone = document.querySelector('.main-content') || document.querySelector('.input-area');
+    if (!dropZone) return;
+
+    let dragDepth = 0; // dragenter/dragleave also fire for child elements — count depth
+    dropZone.addEventListener('dragenter', (e) => {
+      if (!e.dataTransfer || !Array.from(e.dataTransfer.types || []).includes('Files')) return;
+      dragDepth++;
+      dropZone.classList.add('drag-over');
+    });
+    dropZone.addEventListener('dragover', (e) => { e.preventDefault(); });
+    dropZone.addEventListener('dragleave', () => {
+      dragDepth = Math.max(0, dragDepth - 1);
+      if (dragDepth === 0) dropZone.classList.remove('drag-over');
+    });
+    dropZone.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      dragDepth = 0;
+      dropZone.classList.remove('drag-over');
+      const files = e.dataTransfer ? Array.from(e.dataTransfer.files || []) : [];
+      for (const file of files) await stageAttachedFile(file);
+    });
+  }
+
+  /**
+   * Stages one pasted/dropped File. A file that lives on disk is attached by path, so
+   * it behaves identically to one picked with the 📎 button (and the agent's own tools
+   * can reach it later); clipboard image data has no path, so it gets written to the
+   * app's data folder first — never into the user's project, which is theirs.
+   */
+  async function stageAttachedFile(file) {
+    // Electron 32 removed File.path; webUtils.getPathForFile (exposed in preload) is
+    // the only way left to resolve a dropped file to a real path.
+    const filePath = window.kode.getPathForFile ? window.kode.getPathForFile(file) : '';
+    if (filePath) {
+      addAttachment(filePath);
+      return;
+    }
+
+    if (!file.type || !file.type.startsWith('image/')) {
+      appendError(`Couldn't attach "${file.name || 'that item'}" — only files on disk and images can be attached.`);
+      return;
+    }
+    await addPastedImage(file);
+  }
+
+  /** Writes clipboard image bytes to disk via main.js and stages the result as a chip. */
+  async function addPastedImage(file) {
+    const tab = activeTab();
+    if (!tab) return;
+
+    const id = String(++tab._attachmentIdCounter);
+    const name = file.name || 'Pasted image';
+    tab.attachments.push({
+      id, path: null, name, type: 'image', content: null,
+      data: null, mediaType: file.type || 'image/png', previewUrl: null,
+      status: 'loading', error: null,
+    });
+    renderAttachments();
+
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const result = await window.kode.savePastedImage(bytes, file.type || 'image/png', name);
+      const entry = tab.attachments.find(a => a.id === id);
+      if (!entry) return; // removed while saving
+      if (result.success) {
+        entry.path = result.path;
+        entry.name = result.name;
+        entry.mediaType = result.mediaType;
+        entry.data = result.data;
+        entry.previewUrl = `data:${result.mediaType};base64,${result.data}`;
+        entry.status = 'ready';
+      } else {
+        entry.status = 'error';
+        entry.error = result.error || 'Failed to save image';
+      }
+    } catch (err) {
+      const entry = tab.attachments.find(a => a.id === id);
+      if (entry) {
+        entry.status = 'error';
+        entry.error = err.message || String(err);
+      }
+    }
+    renderAttachments();
   }
 
   async function addAttachment(attachedPath) {
@@ -873,7 +996,15 @@
       if (!entry) return; // removed while loading
       if (result.success) {
         entry.type = result.type;
-        entry.content = result.content;
+        if (result.type === 'image') {
+          // An image has no text content to inject — it travels to the model as real
+          // image content instead (see the send path below).
+          entry.data = result.data;
+          entry.mediaType = result.mediaType;
+          entry.previewUrl = `data:${result.mediaType};base64,${result.data}`;
+        } else {
+          entry.content = result.content;
+        }
         entry.status = 'ready';
       } else {
         entry.status = 'error';
@@ -915,9 +1046,19 @@
     const chip = document.createElement('div');
     chip.className = 'attachment-chip' + (attachment.status === 'loading' ? ' loading' : '') + (attachment.status === 'error' ? ' error' : '');
 
-    const icon = document.createElement('span');
-    icon.className = 'attachment-chip-icon';
-    icon.textContent = attachment.status === 'loading' ? '⏳' : attachment.status === 'error' ? '⚠️' : (attachment.type === 'folder' ? '📁' : '📄');
+    // A ready image shows itself — a thumbnail says what you attached far better than
+    // a filename like "2026-09-11T10-42-03-Pasted-image.png" ever could.
+    let icon;
+    if (attachment.status === 'ready' && attachment.type === 'image' && attachment.previewUrl) {
+      icon = document.createElement('img');
+      icon.className = 'attachment-chip-thumb';
+      icon.src = attachment.previewUrl;
+      icon.alt = attachment.name;
+    } else {
+      icon = document.createElement('span');
+      icon.className = 'attachment-chip-icon';
+      icon.textContent = attachment.status === 'loading' ? '⏳' : attachment.status === 'error' ? '⚠️' : (attachment.type === 'folder' ? '📁' : '📄');
+    }
 
     const name = document.createElement('span');
     name.className = 'attachment-chip-name';
@@ -1069,11 +1210,33 @@
     // Build what the model actually receives: the user's text plus each ready
     // attachment's content (already formatted with a "[Attached file/folder: ...]"
     // header by main.js's get-attachment-content).
+    // Text-ish attachments keep being injected as text; images can't be (that would
+    // hand the model a PNG decoded as UTF-8), so they're sent as real image content
+    // alongside the message instead — see src/shared/messageContent.js.
+    const textAttachments = readyAttachments.filter(a => a.type !== 'image');
+    const imageAttachments = readyAttachments.filter(a => a.type === 'image' && a.data);
+
     let messageToSend = text;
-    if (readyAttachments.length > 0) {
-      const attachmentText = readyAttachments.map(a => a.content).join('\n\n');
+    if (textAttachments.length > 0) {
+      const attachmentText = textAttachments.map(a => a.content).join('\n\n');
       messageToSend = text ? `${text}\n\n${attachmentText}` : attachmentText;
     }
+    if (imageAttachments.length > 0) {
+      // The model sees the image itself; this line tells it where that image also
+      // lives on disk, so the agent can still run its own tools against the file —
+      // and so a model without vision at least knows what it was given.
+      const imageNote = imageAttachments
+        .map(a => `[Attached image: ${a.path || a.name}]`)
+        .join('\n');
+      messageToSend = messageToSend ? `${messageToSend}\n\n${imageNote}` : imageNote;
+    }
+
+    const images = imageAttachments.map(a => ({
+      data: a.data,
+      mediaType: a.mediaType,
+      name: a.name,
+      path: a.path,
+    }));
 
     // Send to backend — tagged with this tab's id so its independent AgentCore
     // instance handles it (see main.js's Per-Tab Agent Registry), and carrying
@@ -1087,6 +1250,7 @@
         messageToSend,
         tab.conversationHistory.slice(0, -1), // history excludes the new message (already sent as 'message' param)
         tab.projectPath,
+        images,
       );
     } catch (err) {
       removeTypingIndicator();

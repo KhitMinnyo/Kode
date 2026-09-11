@@ -272,6 +272,40 @@ function buildFileTree(dirPath, depth, maxDepth) {
   }
 }
 
+/**
+ * Image formats that can be sent to a vision-capable model. Anything else attached
+ * still goes down the normal read-as-text path.
+ */
+const MEDIA_TYPE_EXTENSIONS = {
+  'image/png': '.png',
+  'image/jpeg': '.jpg',
+  'image/gif': '.gif',
+  'image/webp': '.webp',
+};
+const IMAGE_EXTENSIONS = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+};
+
+/**
+ * Ceiling on a single attached image. Images are sent inline as base64, which is ~33%
+ * larger than the file itself and counts against the model's context — a 20MB photo
+ * would blow the request up (and most providers reject it outright) long before it
+ * ever helped anyone.
+ */
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024; // 10MB
+
+function isImagePath(filePath) {
+  return Object.prototype.hasOwnProperty.call(IMAGE_EXTENSIONS, path.extname(filePath).toLowerCase());
+}
+
+function imageMediaType(filePath) {
+  return IMAGE_EXTENSIONS[path.extname(filePath).toLowerCase()] || 'image/png';
+}
+
 /** Renders a buildFileTree() result as an indented plain-text tree, for injecting a folder attachment's contents as text context for the model. */
 function formatFileTreeAsText(tree, indent = '') {
   return tree.map((entry) => {
@@ -715,7 +749,7 @@ function registerIPCHandlers() {
    * differ. Falls back to the legacy global active project only if omitted, for
    * safety.
    */
-  ipcMain.handle('send-message', async (event, { tabId, model, message, history, projectPath }) => {
+  ipcMain.handle('send-message', async (event, { tabId, model, message, history, projectPath, images }) => {
     const sender = event.sender;
     const effectiveTabId = tabId || 'default';
     const { agentCore } = getOrCreateTabAgent(effectiveTabId);
@@ -764,7 +798,11 @@ function registerIPCHandlers() {
           makeConfirmCommandCallback(sender, effectiveTabId),
           // onAskUser callback — ask the renderer to show the ask_user tool's
           // question inline and wait for the person's answer.
-          makeAskUserCallback(sender, effectiveTabId)
+          makeAskUserCallback(sender, effectiveTabId),
+          // Images attached to THIS message (pasted screenshots, dropped/attached
+          // image files). Sent as real image content to vision-capable models — see
+          // src/shared/messageContent.js.
+          Array.isArray(images) ? images : []
         );
 
       // Notify renderer that streaming is complete
@@ -803,6 +841,14 @@ function registerIPCHandlers() {
         userMessage = '⚠️ This model does not support chat. Please select a different model (e.g., llama, deepseek, qwen).';
       } else if (err.message.includes('ECONNREFUSED')) {
         userMessage = '🔌 Cannot connect to Ollama. Please make sure Ollama is running.';
+      } else if (Array.isArray(images) && images.length > 0 && /image|vision|multimodal|content.{0,20}type/i.test(err.message)) {
+        // Providers word this a dozen different ways ("invalid content type",
+        // "model does not support images", a bare 400 mentioning image_url). Rather
+        // than let any of them reach the user as raw API noise, name the one thing
+        // they can act on: this model can't look at pictures, another one can.
+        userMessage = `🖼️ This model can't accept images. Pick a vision-capable model (GPT-5, Claude, Gemini, or a vision Ollama model like llava/qwen2.5-vl) and try again.
+
+${err.message}`;
       }
 
       if (!sender.isDestroyed()) {
@@ -1121,8 +1167,65 @@ function registerIPCHandlers() {
         const text = tree.length > 0 ? formatFileTreeAsText(tree) : '(empty folder)';
         return { success: true, type: 'folder', content: `[Attached folder: ${attachedPath}]\n${text}` };
       }
+      // Images can't go down the read_file path at all — it would hand the model a
+      // screenshot decoded as UTF-8 garbage. They're returned as base64 instead and
+      // travel to the model as real image content (see src/shared/messageContent.js).
+      if (isImagePath(attachedPath)) {
+        const stat = fs.statSync(attachedPath);
+        if (stat.size > MAX_IMAGE_BYTES) {
+          return { success: false, error: `Image is ${(stat.size / 1024 / 1024).toFixed(1)}MB — the limit is ${MAX_IMAGE_BYTES / 1024 / 1024}MB` };
+        }
+        return {
+          success: true,
+          type: 'image',
+          path: attachedPath,
+          name: path.basename(attachedPath),
+          mediaType: imageMediaType(attachedPath),
+          data: fs.readFileSync(attachedPath).toString('base64'),
+        };
+      }
+
       const content = await agentTools.read_file({ path: attachedPath }, null);
       return { success: true, type: 'file', content: `[Attached file: ${attachedPath}]\n${content}` };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  /**
+   * Saves an image pasted (or dropped) into the chat box.
+   *
+   * Clipboard images have no file on disk anywhere — they're raw bytes — so they're
+   * written into the app's own data folder rather than the user's project: a pasted
+   * screenshot is a message attachment, not part of their codebase, and dropping
+   * stray PNGs into a git repo they're actively working in would be rude. Keeping the
+   * file (rather than holding bytes in memory for one turn) also means the agent's
+   * own tools can still reach it by path afterwards.
+   */
+  ipcMain.handle('save-pasted-image', async (event, { bytes, mediaType, name }) => {
+    try {
+      const buffer = Buffer.from(bytes);
+      if (buffer.length === 0) return { success: false, error: 'Empty image' };
+      if (buffer.length > MAX_IMAGE_BYTES) {
+        return { success: false, error: `Image is ${(buffer.length / 1024 / 1024).toFixed(1)}MB — the limit is ${MAX_IMAGE_BYTES / 1024 / 1024}MB` };
+      }
+
+      const dir = path.join(app.getPath('userData'), 'pasted-attachments');
+      fs.mkdirSync(dir, { recursive: true });
+
+      const ext = MEDIA_TYPE_EXTENSIONS[mediaType] || '.png';
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const safeName = (name || 'pasted-image').replace(/[^\w.-]/g, '_').replace(/\.[^.]*$/, '');
+      const fullPath = path.join(dir, `${stamp}-${safeName}${ext}`);
+      fs.writeFileSync(fullPath, buffer);
+
+      return {
+        success: true,
+        path: fullPath,
+        name: path.basename(fullPath),
+        mediaType: mediaType || 'image/png',
+        data: buffer.toString('base64'),
+      };
     } catch (err) {
       return { success: false, error: err.message };
     }

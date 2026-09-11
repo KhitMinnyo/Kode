@@ -2,6 +2,8 @@
 
 const http = require('http');
 
+const { textOf, imagePartsOf } = require('../shared/messageContent');
+
 const {
   MAX_TIME_TO_FIRST_OUTPUT,
   REASONING_REPORT_INTERVAL,
@@ -304,6 +306,26 @@ class OllamaClient {
    * @returns {Promise<{text: string, toolCalls: Array<object>}>} - Full response text plus any
    *   native tool calls the model returned (empty array if none / unsupported).
    */
+
+  /**
+   * Converts Kode's provider-neutral multimodal content into Ollama's shape, which is
+   * unlike either cloud API: the text stays a plain string on `content`, and images
+   * ride alongside it as bare base64 strings in a message-level `images` array.
+   * Plain-string content — every text-only turn — passes through untouched. Sending
+   * images to a model without vision is answered by Ollama itself (it ignores or
+   * rejects them), which is clearer than guessing from the model name here.
+   * See src/shared/messageContent.js.
+   */
+  _normalizeMessages(messages) {
+    return messages.map((msg) => {
+      if (!Array.isArray(msg.content)) return msg;
+      const images = imagePartsOf(msg.content).map((part) => part.data);
+      const normalized = { ...msg, content: textOf(msg.content) };
+      if (images.length > 0) normalized.images = images;
+      return normalized;
+    });
+  }
+
   async chat(model, messages, onChunk = () => {}, opts = {}) {
     if (!model || typeof model !== 'string') {
       throw new Error('Model name is required');
@@ -327,7 +349,7 @@ class OllamaClient {
 
     const requestBody = {
       model,
-      messages,
+      messages: this._normalizeMessages(messages),
       stream: true,
       keep_alive: opts.keepAlive !== undefined ? opts.keepAlive : DEFAULT_KEEP_ALIVE,
       options: {

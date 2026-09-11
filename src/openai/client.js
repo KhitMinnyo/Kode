@@ -219,6 +219,25 @@ class OpenAIClient {
   /**
    * @returns {Promise<{text: string, toolCalls: Array<object>}>}
    */
+
+  /**
+   * Converts Kode's provider-neutral multimodal content into OpenAI's `content`
+   * parts. A message whose content is a plain string — every text-only turn — is
+   * passed through completely untouched, so this only ever changes a request that
+   * actually carries an image. See src/shared/messageContent.js.
+   */
+  _normalizeMessages(messages) {
+    return messages.map((msg) => {
+      if (!Array.isArray(msg.content)) return msg;
+      const parts = msg.content.map((part) => (
+        part && part.type === 'image'
+          ? { type: 'image_url', image_url: { url: `data:${part.mediaType || 'image/png'};base64,${part.data}` } }
+          : { type: 'text', text: (part && part.text) || '' }
+      ));
+      return { ...msg, content: parts };
+    });
+  }
+
   async chat(model, messages, onChunk = () => {}, opts = {}) {
     if (!model || typeof model !== 'string') throw new Error('Model name is required');
     if (!Array.isArray(messages) || messages.length === 0) throw new Error('Messages array is required and must not be empty');
@@ -235,7 +254,7 @@ class OpenAIClient {
 
     const requestBody = {
       model,
-      messages,
+      messages: this._normalizeMessages(messages),
       stream: true,
       temperature: opts.temperature !== undefined ? opts.temperature : 0.7,
     };

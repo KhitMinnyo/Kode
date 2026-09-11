@@ -2,6 +2,8 @@
 
 const https = require('https');
 
+const { textOf } = require('../shared/messageContent');
+
 const {
   MAX_TIME_TO_FIRST_OUTPUT,
   REASONING_REPORT_INTERVAL,
@@ -218,14 +220,35 @@ class AnthropicClient {
    * role:'system' entries, per AgentCore's context-building logic) into Anthropic's
    * separate `system` string plus a user/assistant-only conversation array.
    */
+
+  /**
+   * Converts Kode's provider-neutral multimodal content into Anthropic's content
+   * blocks: an image becomes a base64 `source` block rather than OpenAI's data-URL
+   * `image_url`. Plain-string content — every text-only turn — passes through
+   * untouched. See src/shared/messageContent.js.
+   */
+  _normalizeContent(content) {
+    if (!Array.isArray(content)) return content;
+    return content.map((part) => (
+      part && part.type === 'image'
+        ? { type: 'image', source: { type: 'base64', media_type: part.mediaType || 'image/png', data: part.data } }
+        : { type: 'text', text: (part && part.text) || '' }
+    ));
+  }
+
   _splitSystemAndConversation(messages) {
     const systemParts = [];
     const conversation = [];
     for (const msg of messages) {
       if (msg.role === 'system') {
-        systemParts.push(msg.content);
+        // A system prompt is always plain text; textOf() keeps this safe if that ever
+        // stops being true rather than stringifying an array into "[object Object]".
+        systemParts.push(textOf(msg.content));
       } else {
-        conversation.push({ role: msg.role === 'assistant' ? 'assistant' : 'user', content: msg.content });
+        conversation.push({
+          role: msg.role === 'assistant' ? 'assistant' : 'user',
+          content: this._normalizeContent(msg.content),
+        });
       }
     }
     return { system: systemParts.join('\n\n'), conversation };
