@@ -1043,7 +1043,7 @@ function walkAuditFiles(root, dir = root, out = []) {
 const AUDIT_RULES = [
   // --- Hardcoded secrets ---
   { category: 'hardcoded-secret', severity: 'HIGH', redact: true, secretGroup: 1,
-    regex: /\b(?:api[_-]?key|secret[_-]?key|access[_-]?key|auth[_-]?token|client[_-]?secret|password|passwd|pwd)\s*[:=]\s*['"]([A-Za-z0-9+/_\-]{12,})['"]/i,
+    regex: /\b(?:api[_-]?key|secret[_-]?key|access[_-]?key|auth[_-]?token|client[_-]?secret|password|passwd|pwd)\s*[:=]\s*['"]([A-Za-z0-9+/_-]{12,})['"]/i,
     description: 'Possible hardcoded credential (key/token/password assigned to a literal string)' },
   { category: 'hardcoded-secret', severity: 'HIGH', redact: true,
     regex: /AKIA[0-9A-Z]{16}/,

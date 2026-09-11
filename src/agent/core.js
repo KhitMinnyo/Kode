@@ -176,6 +176,7 @@ function tryParseToolJSON(jsonStr) {
     // Fix unescaped control characters inside strings
     const fixed = jsonStr
       .replace(/\t/g, '\\t')
+      // eslint-disable-next-line no-control-regex
       .replace(/[\x00-\x1f]/g, (c) => {
         if (c === '\n' || c === '\r') return c; // keep structural newlines
         return '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0');
@@ -207,6 +208,7 @@ function tryParseToolJSON(jsonStr) {
     const params = {};
     if (pathMatch) params.path = pathMatch[1];
     if (commandMatch) params.command = commandMatch[1];
+    if (urlMatch) params.url = urlMatch[1];
     if (contentMatch) {
       // Unescape the content
       params.content = contentMatch[1].replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\"/g, '"');
