@@ -9,14 +9,35 @@
 1. 🤖 **A coding agent** — like Claude Code or OpenCode. It reads your project, writes and edits files, runs commands, debugs failures, and keeps working until the task is actually done.
 2. 🛡️ **A security agent** — it audits *your own* source code for vulnerabilities (insecure patterns, missing validation, outdated dependencies) and, going further, runs real penetration-testing tools against systems you're authorized to test — matching findings to CVEs and producing a report with severity ratings and fixes.
 
-It's a native macOS desktop app. Run it fully offline with local [Ollama](https://ollama.ai) models — your code never leaves your machine — or connect it to OpenAI, Claude, DeepSeek, or any OpenAI-compatible cloud API.
+It's a native desktop app for macOS and Windows. Run it fully offline with local [Ollama](https://ollama.ai) models — your code never leaves your machine — or connect it to OpenAI, Claude, DeepSeek, or any OpenAI-compatible cloud API.
 
 ## 📥 Install
 
-**Prebuilt (Releases):** download the `.dmg`, drag Kode to Applications, then run once — builds aren't notarized, so Gatekeeper blocks them until you clear the quarantine flag:
+Download the installer for your platform from [Releases](https://github.com/KhitMinnyo/Kode/releases). Builds aren't code-signed, so both operating systems quarantine them on first run — one command clears it.
+
+### macOS
+
+Open the `.dmg`, drag Kode to Applications, then clear the quarantine flag Gatekeeper puts on apps that aren't notarized:
+
 ```bash
 xattr -cr /Applications/Kode.app
 ```
+
+### Windows
+
+Download `Kode-<version>-x64.exe` (or `-arm64.exe` on an ARM device). Windows tags every downloaded file with a "came from the internet" mark, and SmartScreen refuses to run an unsigned installer carrying it. Clearing that mark is the direct equivalent of macOS's `xattr -cr`:
+
+```powershell
+Unblock-File -Path .\Kode-1.1.5-x64.exe
+```
+
+Without PowerShell: right-click the `.exe` → **Properties** → tick **Unblock** → **OK**.
+
+If SmartScreen still shows *"Windows protected your PC"*, click **More info** → **Run anyway**. Kode installs to `%LOCALAPPDATA%\Programs\Kode` unless you choose another folder during setup.
+
+**If setup ends with "Missing Shortcut — Windows is searching for Kode.exe":** Microsoft Defender quarantined `Kode.exe` after the installer extracted it, so the shortcut it just created points at a file that is no longer there — the app isn't broken, its executable was removed out from under it. Open **Windows Security → Virus & threat protection → Protection history**, find the blocked `Kode.exe`, choose **Allow on device**, then run the installer again.
+
+> Both warnings are about the *absence of a code-signing certificate*, not about anything found in the app. They disappear on signed builds — see [Code Signing](#code-signing-optional).
 
 **From source:** see [Quick Start](#-quick-start) below.
 
@@ -61,7 +82,7 @@ xattr -cr /Applications/Kode.app
 
 ## 📋 Requirements
 
-- macOS 12+ (Monterey or later)
+- macOS 12+ (Monterey or later), or Windows 10/11
 - [Ollama](https://ollama.ai) installed and running (for local models)
 - A coding model pulled: `ollama pull qwen2.5-coder:7b`
 - Optional: `ollama pull nomic-embed-text` for semantic search
@@ -107,8 +128,15 @@ npm start
 ### Build macOS App
 ```bash
 npm run build
-# → dist/Kode-1.1.1-arm64.dmg (Apple Silicon), dist/Kode-1.1.1-x64.dmg (Intel)
+# → dist/Kode-1.1.5-universal.dmg (Apple Silicon + Intel)
 ```
+
+### Build Windows App
+```bash
+npm run build:win
+# → dist/Kode-1.1.5-x64.exe, dist/Kode-1.1.5-arm64.exe  (NSIS installers)
+```
+Cross-building a Windows installer from macOS works for the unsigned case; sign on Windows (or in CI — `.github/workflows/build-win.yml`) when you have a certificate.
 
 ### Tests & Linting
 ```bash
@@ -118,7 +146,11 @@ npm run lint
 CI (`.github/workflows/build-*.yml`) runs `npm test` before every build.
 
 ### Code Signing (optional)
-Unsigned builds trigger Gatekeeper warnings for anyone but you — see [Install](#-install) for running one anyway. To sign and notarize instead, set as env vars or GitHub Actions secrets: `CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`. `npm run build` picks them up automatically.
+Unsigned builds trigger Gatekeeper warnings on macOS and SmartScreen warnings on Windows for anyone but you — see [Install](#-install) for running one anyway.
+
+**macOS:** set as env vars or GitHub Actions secrets: `CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`. `npm run build` picks them up automatically.
+
+**Windows:** set `CSC_LINK` (path or base64 of a `.pfx`) and `CSC_KEY_PASSWORD`; `npm run build:win` picks them up the same way. Note that an ordinary OV certificate does not silence SmartScreen immediately — reputation builds up over downloads — while an EV certificate is trusted from the first run.
 
 ## 🏗️ Project Structure
 
