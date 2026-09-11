@@ -2,6 +2,15 @@
 
 const https = require('https');
 
+const {
+  MAX_TIME_TO_FIRST_OUTPUT,
+  REASONING_REPORT_INTERVAL,
+  CHARS_PER_TOKEN,
+  SOCKET_IDLE_TIMEOUT,
+  guardStreamingRequest,
+  armFirstOutputDeadline,
+} = require('../shared/streamGuards');
+
 const DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 const DEFAULT_TIMEOUT = 30000;
 
@@ -199,36 +208,21 @@ class DeepSeekClient {
           resolve();
         });
 
-        res.on('error', (err) => reject(err));
+        res.on('error', (err) => reject(guard.mapError(err)));
       });
 
-      req.on('error', (err) => {
-        if (err.message === 'Request aborted' || err.code === 'ECONNRESET') {
-          // Gracefully handle abort
-          resolve();
-        } else {
-          reject(err);
-        }
+      // Socket inactivity timeout, TCP keepalive, abort wiring — and the error mapper
+      // every rejection path below goes through. Rejecting on abort (instead of the
+      // old silent resolve() on ECONNRESET) is what lets chat()'s catch tag the result
+      // as stalled. See src/shared/streamGuards.js.
+      const guard = guardStreamingRequest(req, {
+        urlPath,
+        signal,
+        idleTimeout: timeout > 0 ? timeout : SOCKET_IDLE_TIMEOUT,
       });
+      if (guard.aborted) { reject(guard.mapError(new Error('Request aborted'))); return; }
 
-      if (timeout > 0) {
-        req.on('timeout', () => {
-          req.destroy();
-          reject(new Error(`Streaming request to ${urlPath} timed out`));
-        });
-      }
-
-      // Wire up abort signal
-      if (signal) {
-        if (signal.aborted) {
-          req.destroy();
-          resolve();
-          return;
-        }
-        signal.addEventListener('abort', () => {
-          req.destroy();
-        }, { once: true });
-      }
+      req.on('error', (err) => reject(guard.mapError(err)));
 
       if (body !== null) {
         const payload = JSON.stringify(body);
@@ -389,6 +383,11 @@ class DeepSeekClient {
     // OpenAI-compatible, including how streamed tool_calls arrive in pieces.
     const toolCallAccumulator = {};
 
+    // Thinking models stream `reasoning_content` before any answer text; these track it
+    // so the UI can show the turn is alive (see the delta handler below).
+    let reasoningChars = 0;
+    let lastReasoningReport = 0;
+
     // Stall timeout: aborts if the model goes silent for this long — whether that's
     // before the first token, or in the middle of an otherwise-active stream (a
     // connection can stall silently at any point, not just at the very start; a
@@ -410,6 +409,21 @@ class DeepSeekClient {
     };
     armStallTimeout();
 
+    // armStallTimeout() above is re-armed by EVERY chunk, including keep-alive frames
+    // and reasoning deltas — traffic that carries no answer. This one-shot deadline is
+    // never re-armed, so it bounds how long a request may run without producing a
+    // single usable token or tool call.
+    const outputDeadline = armFirstOutputDeadline(
+      () => firstTokenTime !== null,
+      () => {
+        if (this._abortController) {
+          console.warn(`[DeepSeekClient] No output after ${MAX_TIME_TO_FIRST_OUTPUT / 1000}s (reasoning/keep-alive only) — aborting.`);
+          this._abortReason = 'stall';
+          this._abortController.abort();
+        }
+      },
+    );
+
     try {
       let chunkCount = 0;
       await this._streamRequestWithRetry('POST', '/v1/chat/completions', requestBody, (chunk) => {
@@ -423,6 +437,27 @@ class DeepSeekClient {
         // OpenAI-compatible SSE: chunk.choices[0].delta.content
         if (chunk.choices && chunk.choices.length > 0) {
           const delta = chunk.choices[0].delta;
+
+          // Thinking models (deepseek-v4-pro and the R1 lineage) stream their chain of
+          // thought as `reasoning_content` — often for minutes before the first answer
+          // token. Report it as progress only: thinking is not part of the model's
+          // answer, so it must not land in fullResponse, and it deliberately does NOT
+          // set firstTokenTime (the first-output deadline still has to apply).
+          const reasoningPiece = delta && (typeof delta.reasoning_content === 'string'
+            ? delta.reasoning_content
+            : (typeof delta.reasoning === 'string' ? delta.reasoning : ''));
+          if (reasoningPiece) {
+            reasoningChars += reasoningPiece.length;
+            const now = Date.now();
+            if (now - lastReasoningReport >= REASONING_REPORT_INTERVAL) {
+              lastReasoningReport = now;
+              onProgress({
+                event: 'reasoning',
+                tokens: Math.ceil(reasoningChars / CHARS_PER_TOKEN),
+                elapsed: now - startTime,
+              });
+            }
+          }
 
           if (delta && Array.isArray(delta.tool_calls)) {
             for (const tc of delta.tool_calls) {
@@ -485,11 +520,15 @@ class DeepSeekClient {
       }, { signal });
     } catch (err) {
       clearTimeout(firstTokenTimeout);
-      if (err.message === 'Request aborted') {
+      clearTimeout(outputDeadline);
+      // err.aborted / err.timedOut are set by streamGuards.mapError. A dead connection
+      // (timedOut) is a stall in every way that matters to the caller, so report it as
+      // one instead of throwing an error the agent loop can only give up on.
+      if (err.aborted || err.timedOut || err.message === 'Request aborted') {
         // A user-clicked Stop also lands here (same AbortController), but that path
         // never sets _abortReason to 'stall' — see abort() below — so `stalled` only
         // ever ends up true for an actual stall timeout, never a deliberate user stop.
-        const stalled = this._abortReason === 'stall';
+        const stalled = this._abortReason === 'stall' || err.timedOut === true;
         if (!firstTokenTime) {
           return { text: '⏱️ Model took too long to respond. Try a different model or simplify your request.', toolCalls: [], stalled };
         }
@@ -498,12 +537,13 @@ class DeepSeekClient {
       throw err;
     } finally {
       clearTimeout(firstTokenTimeout);
+      clearTimeout(outputDeadline);
       this._abortController = null;
       this._abortReason = null;
     }
 
     const toolCalls = Object.values(toolCallAccumulator).map((tc) => ({ function: { name: tc.function.name, arguments: tc.function.arguments } }));
-    return { text: fullResponse, toolCalls };
+    return { text: fullResponse, toolCalls, stalled: false };
   }
 
   /**

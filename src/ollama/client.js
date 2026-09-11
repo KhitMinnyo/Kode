@@ -2,6 +2,15 @@
 
 const http = require('http');
 
+const {
+  MAX_TIME_TO_FIRST_OUTPUT,
+  REASONING_REPORT_INTERVAL,
+  CHARS_PER_TOKEN,
+  SOCKET_IDLE_TIMEOUT,
+  guardStreamingRequest,
+  armFirstOutputDeadline,
+} = require('../shared/streamGuards');
+
 const OLLAMA_BASE_URL = 'http://localhost:11434';
 const DEFAULT_TIMEOUT = 30000;
 
@@ -163,38 +172,27 @@ class OllamaClient {
           resolve();
         });
 
-        res.on('error', (err) => reject(err));
+        res.on('error', (err) => reject(guard.mapError(err)));
       });
+
+      // Socket inactivity timeout, TCP keepalive, abort wiring — and the error mapper
+      // every rejection path below goes through. Rejecting on abort (instead of the
+      // old silent resolve() on ECONNRESET) is what lets chat()'s catch tag the result
+      // as stalled. See src/shared/streamGuards.js.
+      const guard = guardStreamingRequest(req, {
+        urlPath: path,
+        signal,
+        idleTimeout: timeout > 0 ? timeout : SOCKET_IDLE_TIMEOUT,
+      });
+      if (guard.aborted) { reject(guard.mapError(new Error('Request aborted'))); return; }
 
       req.on('error', (err) => {
         if (err.code === 'ECONNREFUSED') {
           reject(new Error('Ollama is not running. Please start Ollama and try again.'));
-        } else if (err.message === 'Request aborted' || err.code === 'ECONNRESET') {
-          // Gracefully handle abort
-          resolve();
-        } else {
-          reject(err);
-        }
-      });
-
-      if (timeout > 0) {
-        req.on('timeout', () => {
-          req.destroy();
-          reject(new Error(`Streaming request to ${path} timed out`));
-        });
-      }
-
-      // Wire up abort signal
-      if (signal) {
-        if (signal.aborted) {
-          req.destroy();
-          resolve();
           return;
         }
-        signal.addEventListener('abort', () => {
-          req.destroy();
-        }, { once: true });
-      }
+        reject(guard.mapError(err));
+      });
 
       if (body !== null) {
         const payload = JSON.stringify(body);
@@ -343,6 +341,11 @@ class OllamaClient {
       requestBody.tools = opts.tools;
     }
 
+    // Thinking models (qwen3, deepseek-r1, gpt-oss, ...) stream a `thinking` field
+    // before any answer content; these track it so the UI can show the turn is alive.
+    let reasoningChars = 0;
+    let lastReasoningReport = 0;
+
     // Stall timeout: aborts if the model goes silent for this long — whether that's
     // before the first token, or in the middle of an otherwise-active stream (a
     // connection can stall silently at any point, not just at the very start; a
@@ -364,6 +367,21 @@ class OllamaClient {
     };
     armStallTimeout();
 
+    // armStallTimeout() above is re-armed by EVERY chunk, including the thinking-only
+    // chunks a reasoning model emits before it answers. This one-shot deadline is never
+    // re-armed, so it bounds how long a request may run without producing a single
+    // usable token or tool call.
+    const outputDeadline = armFirstOutputDeadline(
+      () => firstTokenTime !== null,
+      () => {
+        if (this._abortController) {
+          console.warn(`[OllamaClient] No output after ${MAX_TIME_TO_FIRST_OUTPUT / 1000}s (thinking only) — aborting.`);
+          this._abortReason = 'stall';
+          this._abortController.abort();
+        }
+      },
+    );
+
     try {
       let chunkCount = 0;
       await this._streamRequest('POST', '/api/chat', requestBody, (chunk) => {
@@ -379,6 +397,23 @@ class OllamaClient {
         // incrementally like OpenAI-style deltas).
         if (chunk.message && Array.isArray(chunk.message.tool_calls) && chunk.message.tool_calls.length > 0) {
           toolCalls.push(...chunk.message.tool_calls);
+        }
+
+        // Ollama surfaces a thinking model's chain of thought in its own `thinking`
+        // field, separate from `content`. Report it as progress only: it is not part of
+        // the model's answer, so it must not land in fullResponse, and it deliberately
+        // does NOT set firstTokenTime (the first-output deadline still has to apply).
+        if (chunk.message && typeof chunk.message.thinking === 'string' && chunk.message.thinking) {
+          reasoningChars += chunk.message.thinking.length;
+          const now = Date.now();
+          if (now - lastReasoningReport >= REASONING_REPORT_INTERVAL) {
+            lastReasoningReport = now;
+            onProgress({
+              event: 'reasoning',
+              tokens: Math.ceil(reasoningChars / CHARS_PER_TOKEN),
+              elapsed: now - startTime,
+            });
+          }
         }
 
         if (chunk.message && chunk.message.content !== undefined) {
@@ -423,14 +458,18 @@ class OllamaClient {
       }, { signal });
     } catch (err) {
       clearTimeout(firstTokenTimeout);
-      if (err.message === 'Request aborted') {
+      clearTimeout(outputDeadline);
+      // err.aborted / err.timedOut are set by streamGuards.mapError. A dead connection
+      // (timedOut) is a stall in every way that matters to the caller, so report it as
+      // one instead of throwing an error the agent loop can only give up on.
+      if (err.aborted || err.timedOut || err.message === 'Request aborted') {
         // A user-clicked Stop also lands here (same AbortController), but that path
         // never sets _abortReason to 'stall' — see stopGeneration()/abort() below —
         // so `stalled` only ever ends up true for an actual stall timeout, never a
         // deliberate user stop. AgentCore uses this to avoid treating a stalled
         // response (empty, or cut off mid-way) as if it were the model's genuine,
         // complete answer.
-        const stalled = this._abortReason === 'stall';
+        const stalled = this._abortReason === 'stall' || err.timedOut === true;
         if (!firstTokenTime) {
           return { text: '⏱️ Model took too long to respond. Try a smaller/faster model or simplify your request.', toolCalls: [], stalled };
         }
@@ -439,11 +478,12 @@ class OllamaClient {
       throw err;
     } finally {
       clearTimeout(firstTokenTimeout);
+      clearTimeout(outputDeadline);
       this._abortController = null;
       this._abortReason = null;
     }
 
-    return { text: fullResponse, toolCalls };
+    return { text: fullResponse, toolCalls, stalled: false };
   }
 
   /**

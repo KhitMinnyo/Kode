@@ -1093,6 +1093,14 @@
       tab.isGenerating = false;
       setGeneratingUI(tab, false);
       renderTabBar();
+      // The turn is over — stop its clock. A failed invoke never produces the 'idle'
+      // agent-status event that normally resets this, so without it the header kept
+      // showing the last status ("Planning and analyzing...") with the elapsed timer
+      // still counting up, directly above an error saying the request had failed.
+      tab._statusStartTime = null;
+      tab._lastStatusKind = null;
+      tab._tokenCount = 0;
+      if (tab === activeTab()) clearAgentStatus();
       appendError(`Failed to send message: ${err.message || err}`);
     }
   }
@@ -1719,6 +1727,14 @@
       clearInterval(state._statusTimer);
       state._statusTimer = null;
     }
+
+    // Blank both readouts too. Leaving them populated is half of what made a finished
+    // or failed turn still look live: the clock stopped ticking but kept its last
+    // value, next to a token count from a turn that had already ended.
+    const timerEl = document.getElementById('elapsed-timer');
+    if (timerEl) timerEl.textContent = '';
+    const tokenEl = document.getElementById('token-counter');
+    if (tokenEl) tokenEl.textContent = '';
   }
 
   /** ONE shared interval that redraws the header from whichever tab is currently focused — there's only ever one visible timer, so no need for one interval per tab. */
@@ -1740,9 +1756,14 @@
 
   function updateTokenCounter(tab) {
     const el = document.getElementById('token-counter');
-    if (el && tab && tab._tokenCount > 0) {
-      el.textContent = `${tab._tokenCount} tokens`;
-    }
+    if (!el) return;
+    // Write even when the count is 0. Skipping the update left the PREVIOUS turn's
+    // number frozen on screen for the whole of the next one — so a turn that streams no
+    // text at all (a reasoning model thinking, or a tool-only turn) showed a stale count
+    // that never moved, which reads as "stuck" when the turn is in fact running. Note
+    // this only ever counts tokens streamed to the UI, not prompt or reasoning tokens,
+    // so it is a liveness indicator and not a measure of what the turn actually cost.
+    el.textContent = tab && tab._tokenCount > 0 ? `${tab._tokenCount} tokens` : '';
   }
 
   /* ==========================================================

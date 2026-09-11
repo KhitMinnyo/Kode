@@ -360,3 +360,50 @@ test('renderer parallel tabs and ask_user modal', async (t) => {
     assert.equal(captured.sendMessageCalls.length, beforeCount, 'expected no automatic follow-up send for a normal finish');
   });
 });
+
+/**
+ * Regression: a send-message invoke that fails must end the turn in the UI too.
+ *
+ * When the main-process handler never replied (a streaming request that could never
+ * settle), Electron rejected the pending invoke with "reply was never sent" — and the
+ * renderer printed that error while leaving the header exactly as it was: the last
+ * status still showing, the elapsed clock still counting up, and the previous turn's
+ * token count still on screen. The turn looked alive for as long as the window stayed
+ * open, which is what made a failed turn so hard to tell apart from a running one.
+ */
+test('a failed send-message clears the status bar, the elapsed timer and the token counter', async (t) => {
+  const { dom, window, document, captured } = await bootApp();
+  after(() => dom.window.close());
+  const $ = (sel) => document.querySelector(sel);
+
+  // Reproduce the real sequence: the agent reports it is working and streams a little
+  // text (so the header has both a status and a token count), and only then does the
+  // IPC call it is waiting on fail.
+  window.kode.sendMessage = async (tabId) => {
+    captured.onAgentStatus({ tabId, status: 'thinking', message: 'Planning and analyzing...' });
+    captured.onStreamToken({ tabId, token: 'partial answer' });
+    await new Promise((r) => setTimeout(r, 5));
+    throw new Error("Error invoking remote method 'send-message': reply was never sent");
+  };
+
+  $('#message-input').value = 'audit this project';
+  $('#send-btn').click();
+  await new Promise((r) => setTimeout(r, 30));
+
+  await t.test('the failure is reported to the user', () => {
+    assert.match(document.getElementById('messages-container').textContent, /reply was never sent/);
+  });
+
+  await t.test('the header stops claiming the turn is still running', () => {
+    assert.ok(!document.getElementById('agent-status-bar').classList.contains('active'));
+    assert.equal(document.getElementById('elapsed-timer').textContent, '');
+    assert.equal(document.getElementById('token-counter').textContent, '');
+  });
+
+  await t.test('the elapsed timer really is stopped, not just blanked once', async () => {
+    // The interval redraws every second, so anything still running would put a value
+    // back here — which is exactly what the original bug looked like on screen.
+    await new Promise((r) => setTimeout(r, 1200));
+    assert.equal(document.getElementById('elapsed-timer').textContent, '');
+  });
+});

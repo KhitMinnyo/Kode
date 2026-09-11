@@ -26,6 +26,18 @@ const DEFAULT_MAX_TOOL_ITERATIONS = 25;
 // the loop forever.
 const MAX_STALL_NUDGES = 3;
 
+// How many times processMessage will nudge a model that returned nothing at all —
+// no text, no tool call — without the connection having stalled. This used to be
+// unbounded: only the stalled variant was counted against MAX_STALL_NUDGES, and the
+// plain-empty branch just retried. Each retry re-sends the ENTIRE conversation, so an
+// unbudgeted loop here quietly burns a full context window per attempt, up to
+// maxToolIterations (25) times — roughly two hours and a very large bill for a turn
+// that was never going to finish. It stayed invisible for as long as it did because a
+// genuine 5-minute stall was being mis-reported as an ordinary empty response (the
+// abort path resolved instead of rejecting — see src/shared/streamGuards.js), so the
+// stall budget above never applied to it.
+const MAX_EMPTY_NUDGES = 3;
+
 // How many times processMessage will nudge the model to fix a problem that automatic
 // post-"Done" verification (_verifyDoneClaim below) actually found, before giving up
 // and just reporting the problem instead of silently accepting the claim. Smaller than
@@ -1037,6 +1049,7 @@ ${newlyDroppedText}`;
       let iteration = 0;
       let finalResponse = '';
       let consecutiveStalls = 0; // see MAX_STALL_NUDGES
+      let consecutiveEmpties = 0; // see MAX_EMPTY_NUDGES
       let consecutiveVerifyFails = 0; // see MAX_VERIFY_NUDGES / _verifyDoneClaim
       // Set true at every deliberate exit from the loop below (task done, user Stop,
       // stall budget exhausted). If the loop instead runs out of this.maxToolIterations
@@ -1107,6 +1120,15 @@ ${newlyDroppedText}`;
           onProgress: (progress) => {
             if (progress.event === 'progress') {
               onStatus({ status: 'generating', message: `Generating... ${progress.tokensPerSec} tok/s` });
+            } else if (progress.event === 'reasoning') {
+              // A reasoning model can think for minutes before its first answer token,
+              // and its thinking never reaches onToken. Without this the header sat on
+              // one status line with a climbing clock and a frozen token count for the
+              // whole time — indistinguishable from a hang, which is what sent us
+              // looking for a bug that wasn't there. See the reasoning-delta handling
+              // in the provider clients.
+              const secs = Math.round((progress.elapsed || 0) / 1000);
+              onStatus({ status: 'thinking', message: `Thinking... (~${progress.tokens} reasoning tokens, ${secs}s)` });
             }
           },
         });
@@ -1146,11 +1168,20 @@ ${newlyDroppedText}`;
             endedWithReason = true;
             break;
           }
+          // The same ceiling for a model that simply keeps returning nothing. See
+          // MAX_EMPTY_NUDGES for why an unbudgeted retry here is so expensive.
+          if (!stalledEmpty && consecutiveEmpties >= MAX_EMPTY_NUDGES) {
+            finalResponse = `⚠️ The model returned an empty response ${MAX_EMPTY_NUDGES} times in a row, so I stopped rather than keep re-sending the whole conversation. Try again, or switch to a different model.`;
+            conversationHistory.push({ role: 'assistant', content: finalResponse });
+            endedWithReason = true;
+            break;
+          }
           if (stalledEmpty) {
             consecutiveStalls++;
             console.warn(`[AgentCore] Stream stalled with no response at iteration ${iteration} (stall ${consecutiveStalls}/${MAX_STALL_NUDGES}), retrying with nudge`);
           } else {
-            console.warn(`[AgentCore] Empty response at iteration ${iteration}, retrying with nudge`);
+            consecutiveEmpties++;
+            console.warn(`[AgentCore] Empty response at iteration ${iteration} (empty ${consecutiveEmpties}/${MAX_EMPTY_NUDGES}), retrying with nudge`);
           }
           conversationHistory.push({
             role: 'assistant',
@@ -1285,6 +1316,7 @@ ${newlyDroppedText}`;
 
         // There are tool calls — real progress happened, so reset the stall counter.
         consecutiveStalls = 0;
+        consecutiveEmpties = 0;
         consecutiveVerifyFails = 0;
 
         // There are tool calls — add assistant message to history
