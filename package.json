@@ -1,6 +1,6 @@
 {
   "name": "kode",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "description": "Kode — AI Coding & Cybersecurity Agent powered by Ollama",
   "repository": "https://github.com/KhitMinnyo/Kode",
   "main": "main.js",
