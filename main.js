@@ -586,7 +586,28 @@ function createMainWindow() {
       // itself never uses Node APIs directly — everything goes through the
       // window.kode bridge. See https://www.electronjs.org/docs/latest/tutorial/sandbox
       sandbox: true,
+      // Enables the <webview> tag used by the Preview panel to render a running dev
+      // server / built page. It's off by default; every webview that actually attaches
+      // is stripped of Node access and any preload in will-attach-webview below, so
+      // the previewed page (potentially the user's own in-progress, buggy, or
+      // untrusted-dependency-laden app) runs with no privileged surface.
+      webviewTag: true,
     },
+  });
+
+  // Harden every <webview> the renderer creates before it loads anything. The Preview
+  // panel points a webview at the user's dev server or built files — code the agent
+  // may have just written and never vetted — so it must run with the same "no Node,
+  // no preload, its own process" posture as an ordinary browser tab, never with any
+  // access back into Kode.
+  mainWindow.webContents.on('will-attach-webview', (event, webPreferences, params) => {
+    delete webPreferences.preload;
+    webPreferences.nodeIntegration = false;
+    webPreferences.contextIsolation = true;
+    webPreferences.sandbox = true;
+    // A previewed page must never be able to spawn a new Electron window or navigate
+    // the host; allowpopups is stripped so window.open is inert inside the preview.
+    delete params.allowpopups;
   });
 
   // Load the renderer HTML
@@ -659,6 +680,21 @@ function registerIPCHandlers() {
    */
   ipcMain.handle('list-processes', async () => {
     return { success: true, processes: processManager.list() };
+  });
+
+  /**
+   * Open a URL in the user's real browser — used by the Preview panel's "open in
+   * browser" button. Restricted to http/https/file so a crafted value can't reach
+   * shell handlers for other schemes (e.g. a `file://` is fine, a `javascript:` or
+   * custom-scheme URL is refused).
+   */
+  ipcMain.handle('open-external', async (event, url) => {
+    const u = String(url || '');
+    if (/^(https?:|file:)/i.test(u)) {
+      shell.openExternal(u);
+      return { success: true };
+    }
+    return { success: false, error: 'Refused to open a non-web URL' };
   });
 
   /**

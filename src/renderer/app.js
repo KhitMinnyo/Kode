@@ -173,6 +173,7 @@
     setupAskUserListener();
     setupAttachmentListeners();
     setupPanelResizers();
+    setupPreview();
     loadAppVersion();
     setupUpdateBanner();
     checkForUpdates();
@@ -278,15 +279,19 @@
    * to the CSS defaults if localStorage is unavailable or empty.
    */
   function setupPanelResizers() {
-    const MIN_WIDTH = 200;
-    const MAX_WIDTH = 560;
+    const DEFAULT_MIN = 200;
+    const DEFAULT_MAX = 560;
 
     const configs = [
       { id: 'sidebar-resizer', cssVar: '--sidebar-width', storageKey: 'kode-sidebar-width', invert: false },
       { id: 'right-panel-resizer', cssVar: '--right-panel-width', storageKey: 'kode-right-panel-width', invert: true },
+      // The preview shows a whole app, so it gets a wider ceiling than the text panels.
+      { id: 'preview-resizer', cssVar: '--preview-panel-width', storageKey: 'kode-preview-width', invert: true, min: 320, max: 900 },
     ];
 
-    configs.forEach(({ id, cssVar, storageKey, invert }) => {
+    configs.forEach(({ id, cssVar, storageKey, invert, min, max }) => {
+      const MIN_WIDTH = min || DEFAULT_MIN;
+      const MAX_WIDTH = max || DEFAULT_MAX;
       const handle = document.getElementById(id);
       if (!handle) return;
 
@@ -975,6 +980,318 @@
       }
     }
     renderAttachments();
+  }
+
+  /* ==========================================================
+     Preview panel — a live <webview> of the running project
+     ----------------------------------------------------------
+     Renders the project the way a browser would (via a hardened Electron
+     <webview>, see will-attach-webview in main.js) beside the chat, and closes
+     the loop back to the agent: console errors and failed loads from the previewed
+     page can be sent into the chat with one click, and the rendered page can be
+     screenshotted straight into an image attachment the model can see.
+     ========================================================== */
+
+  const preview = {
+    open: false,
+    webview: null,      // the <webview> element, created lazily on first open
+    url: '',
+    errors: [],         // { kind, text, source, line } captured from the page
+    injected: false,    // whether the page-error hook has been installed this load
+  };
+
+  const previewPanel   = () => document.getElementById('preview-panel');
+  const previewStage   = () => document.getElementById('preview-stage');
+  const previewResizer = () => document.getElementById('preview-resizer');
+
+  function setupPreview() {
+    const toggle = document.getElementById('preview-toggle-btn');
+    if (toggle) toggle.addEventListener('click', () => togglePreview());
+
+    const on = (id, ev, fn) => { const el = document.getElementById(id); if (el) el.addEventListener(ev, fn); };
+
+    on('preview-close', 'click', closePreview);
+    on('preview-reload', 'click', () => { if (preview.webview) { clearPreviewErrors(); preview.webview.reload(); } });
+    on('preview-back', 'click', () => { if (preview.webview && preview.webview.canGoBack()) preview.webview.goBack(); });
+    on('preview-forward', 'click', () => { if (preview.webview && preview.webview.canGoForward()) preview.webview.goForward(); });
+    on('preview-open-external', 'click', () => { if (preview.url) window.kode.openExternal(preview.url); });
+    on('preview-console', 'click', sendPreviewErrorsToChat);
+    on('preview-screenshot', 'click', screenshotPreviewToAttachment);
+
+    on('preview-url', 'keydown', (e) => {
+      if (e.key === 'Enter') {
+        const raw = e.target.value.trim();
+        if (raw) navigatePreview(normalizePreviewUrl(raw));
+      }
+    });
+
+    on('preview-viewport', 'change', (e) => applyPreviewViewport(e.target.value));
+  }
+
+  function togglePreview() {
+    if (preview.open) closePreview();
+    else openPreview();
+  }
+
+  async function openPreview() {
+    preview.open = true;
+    const panel = previewPanel();
+    const resizer = previewResizer();
+    if (panel) panel.hidden = false;
+    if (resizer) resizer.hidden = false;
+    const toggle = document.getElementById('preview-toggle-btn');
+    if (toggle) toggle.classList.add('active');
+
+    ensureWebview();
+
+    // Only auto-pick a target the first time it's opened with nothing loaded — reopening
+    // a panel that already has a page shouldn't yank it back to the dev server.
+    if (!preview.url) {
+      const target = await resolvePreviewTarget();
+      if (target) navigatePreview(target);
+    }
+  }
+
+  function closePreview() {
+    preview.open = false;
+    const panel = previewPanel();
+    const resizer = previewResizer();
+    if (panel) panel.hidden = true;
+    if (resizer) resizer.hidden = true;
+    const toggle = document.getElementById('preview-toggle-btn');
+    if (toggle) toggle.classList.remove('active');
+    // The <webview> is left in place (not destroyed) so its page state and history
+    // survive a hide/show — a hidden panel costs nothing since the element isn't
+    // rendered. It's torn down only if the whole stage is reset.
+  }
+
+  /** Creates the <webview> lazily and wires its events. Safe to call repeatedly. */
+  function ensureWebview() {
+    if (preview.webview) return preview.webview;
+    const stage = previewStage();
+    if (!stage) return null;
+
+    const wv = document.createElement('webview');
+    // No `nodeintegration`, no `preload` — the previewed page (possibly the user's own
+    // half-finished, buggy app) runs as an ordinary sandboxed browser tab. Popups are
+    // disallowed so window.open can't spawn a real Electron window.
+    wv.setAttribute('allowpopups', 'false');
+    wv.style.display = 'none'; // shown once it has something to load
+
+    wv.addEventListener('dom-ready', () => { injectErrorHook(); refreshNavState(); });
+    wv.addEventListener('did-navigate', (e) => { preview.url = e.url; syncUrlBar(); refreshNavState(); });
+    wv.addEventListener('did-navigate-in-page', (e) => { preview.url = e.url; syncUrlBar(); refreshNavState(); });
+    wv.addEventListener('did-start-loading', () => { preview.injected = false; });
+    wv.addEventListener('did-fail-load', (e) => {
+      // errorCode -3 is "aborted" (a normal redirect/cancel), not a real failure.
+      if (e.errorCode && e.errorCode !== -3 && e.isMainFrame !== false) {
+        recordPreviewError({ kind: 'load', text: `Failed to load ${e.validatedURL || preview.url}: ${e.errorDescription} (${e.errorCode})` });
+      }
+    });
+    wv.addEventListener('console-message', (e) => {
+      // Electron console levels: 0 verbose, 1 info, 2 warning, 3 error. Capture
+      // warnings and errors — the noise a developer would actually want to see.
+      if (e.level >= 2) {
+        recordPreviewError({
+          kind: e.level === 3 ? 'error' : 'warning',
+          text: e.message,
+          source: e.sourceId,
+          line: e.line,
+        });
+      }
+    });
+
+    const empty = document.getElementById('preview-empty');
+    if (empty) empty.hidden = true;
+    stage.appendChild(wv);
+    preview.webview = wv;
+    return wv;
+  }
+
+  /**
+   * Picks what to preview: a dev server the agent already started (run_command records
+   * its port in the main-process ProcessManager), else the project's index.html on
+   * disk. This is why "ask the agent to run npm run dev, then open Preview" just works.
+   */
+  async function resolvePreviewTarget() {
+    try {
+      const res = await window.kode.listProcesses();
+      const procs = (res && res.processes) || [];
+      const running = procs.filter(p => p.status === 'running' && p.port);
+      if (running.length > 0) {
+        // Most-recently-started running server wins — it's the one the user most
+        // likely just spun up for this task.
+        running.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
+        return `http://localhost:${running[0].port}`;
+      }
+    } catch { /* fall through to the file fallback */ }
+
+    const tab = activeTab();
+    if (tab && tab.projectPath) {
+      // A static project with no server — point at its index.html if there is one.
+      return `file://${tab.projectPath.replace(/\/$/, '')}/index.html`;
+    }
+    return '';
+  }
+
+  function normalizePreviewUrl(raw) {
+    if (/^(https?:|file:)/i.test(raw)) return raw;
+    if (/^localhost|^127\.0\.0\.1|^\d+$/.test(raw)) {
+      // "3000" or "localhost:3000" → a local dev server URL.
+      return /^\d+$/.test(raw) ? `http://localhost:${raw}` : `http://${raw}`;
+    }
+    return `http://${raw}`;
+  }
+
+  function navigatePreview(url) {
+    const wv = ensureWebview();
+    if (!wv) return;
+    clearPreviewErrors();
+    preview.url = url;
+    syncUrlBar();
+    wv.style.display = '';
+    // src is set via loadURL after attach when possible; setting the attribute also
+    // works and covers the very first navigation before the guest is ready.
+    if (typeof wv.loadURL === 'function' && wv.getWebContentsId) {
+      try { wv.loadURL(url); return; } catch { /* fall back to src */ }
+    }
+    wv.setAttribute('src', url);
+  }
+
+  function refreshNavState() {
+    if (!preview.webview) return;
+    const back = document.getElementById('preview-back');
+    const fwd = document.getElementById('preview-forward');
+    try {
+      if (back) back.disabled = !preview.webview.canGoBack();
+      if (fwd) fwd.disabled = !preview.webview.canGoForward();
+    } catch { /* webview not ready yet */ }
+  }
+
+  function syncUrlBar() {
+    const bar = document.getElementById('preview-url');
+    if (bar && document.activeElement !== bar) bar.value = preview.url;
+  }
+
+  function applyPreviewViewport(value) {
+    const stage = previewStage();
+    const wv = preview.webview;
+    if (!stage || !wv) return;
+    if (value === 'responsive') {
+      stage.classList.remove('fixed-viewport');
+      wv.style.width = '100%';
+      wv.style.height = '100%';
+    } else {
+      const [w, h] = value.split('x');
+      stage.classList.add('fixed-viewport');
+      wv.style.width = `${w}px`;
+      wv.style.height = `${h}px`;
+    }
+  }
+
+  /**
+   * Installs window.onerror / unhandledrejection hooks inside the guest page so uncaught
+   * runtime errors (not just console.* calls) also reach the panel. Runs in the guest's
+   * own world via executeJavaScript; it only calls console.error, which comes straight
+   * back through the console-message listener above — no privileged bridge into the page.
+   */
+  function injectErrorHook() {
+    if (preview.injected || !preview.webview) return;
+    preview.injected = true;
+    const hook = `(function(){
+      if (window.__kodeHooked) return; window.__kodeHooked = true;
+      window.addEventListener('error', function(e){
+        console.error('[uncaught] ' + (e && e.message ? e.message : e) + (e && e.filename ? ' @ ' + e.filename + ':' + e.lineno : ''));
+      });
+      window.addEventListener('unhandledrejection', function(e){
+        var r = e && e.reason; console.error('[unhandledrejection] ' + (r && r.message ? r.message : r));
+      });
+    })();`;
+    try { preview.webview.executeJavaScript(hook); } catch { /* guest not ready — next load will retry */ }
+  }
+
+  function recordPreviewError(err) {
+    preview.errors.push(err);
+    updatePreviewErrorBadge();
+  }
+
+  function clearPreviewErrors() {
+    preview.errors = [];
+    updatePreviewErrorBadge();
+  }
+
+  function updatePreviewErrorBadge() {
+    const count = document.getElementById('preview-error-count');
+    const btn = document.getElementById('preview-console');
+    const n = preview.errors.length;
+    if (count) count.textContent = String(n);
+    if (btn) btn.classList.toggle('has-errors', n > 0);
+  }
+
+  /**
+   * Drops the captured console errors/warnings into the chat input as a ready-to-send
+   * message, and focuses it — the agent can then read and fix them. Left for the user
+   * to actually send (rather than auto-sending) so a stray warning doesn't kick off an
+   * unwanted turn.
+   */
+  function sendPreviewErrorsToChat() {
+    if (preview.errors.length === 0) {
+      appendError('No preview errors captured yet — the page loaded clean, or nothing has run.');
+      return;
+    }
+    const lines = preview.errors.slice(0, 30).map((e, i) => {
+      const loc = e.source ? ` (${e.source}${e.line ? ':' + e.line : ''})` : '';
+      return `${i + 1}. [${e.kind}] ${e.text}${loc}`;
+    });
+    const more = preview.errors.length > 30 ? `\n…and ${preview.errors.length - 30} more.` : '';
+    const body = `The preview at ${preview.url} reported these console errors/warnings — please investigate and fix:\n\n${lines.join('\n')}${more}`;
+
+    const input = messageInput();
+    if (input) {
+      input.value = input.value ? `${input.value}\n\n${body}` : body;
+      input.style.height = 'auto';
+      input.style.height = `${Math.min(input.scrollHeight, 200)}px`;
+      input.focus();
+    }
+  }
+
+  /**
+   * Captures the current preview frame and stages it as an image attachment, so the
+   * model can see the rendered page (layout, a visual bug) rather than just its DOM.
+   * Reuses the same save-to-disk path as a pasted screenshot.
+   */
+  async function screenshotPreviewToAttachment() {
+    const wv = preview.webview;
+    if (!wv || typeof wv.capturePage !== 'function') {
+      appendError('Preview screenshot is unavailable — open a page in the preview first.');
+      return;
+    }
+    const tab = activeTab();
+    if (!tab) return;
+    try {
+      const image = await wv.capturePage();
+      const dataUrl = image.toDataURL(); // data:image/png;base64,...
+      const base64 = dataUrl.split(',')[1] || '';
+      if (!base64) { appendError('Preview screenshot came back empty.'); return; }
+
+      const bin = atob(base64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+
+      const result = await window.kode.savePastedImage(bytes, 'image/png', 'preview-screenshot');
+      if (!result.success) { appendError(`Couldn't save the preview screenshot: ${result.error || 'unknown error'}`); return; }
+
+      const id = String(++tab._attachmentIdCounter);
+      tab.attachments.push({
+        id, path: result.path, name: result.name, type: 'image', content: null,
+        data: result.data, mediaType: result.mediaType,
+        previewUrl: `data:${result.mediaType};base64,${result.data}`,
+        status: 'ready', error: null,
+      });
+      renderAttachments();
+    } catch (err) {
+      appendError(`Preview screenshot failed: ${err.message || err}`);
+    }
   }
 
   async function addAttachment(attachedPath) {

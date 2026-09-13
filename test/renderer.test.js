@@ -95,6 +95,9 @@ async function bootApp() {
     respondAskUserCalls: [],
     savePastedImageCalls: [],
     getAttachmentContentCalls: [],
+    openExternalCalls: [],
+    processes: [],  // a test can set this before opening the preview
+
     onStreamToken: null,
     onToolExecution: null,
     onStreamEnd: null,
@@ -155,6 +158,8 @@ contents` };
     onStreamEnd: (cb) => { captured.onStreamEnd = cb; return () => {}; },
     onStreamError: (cb) => { captured.onStreamError = cb; return () => {}; },
     onAgentStatus: (cb) => { captured.onAgentStatus = cb; return () => {}; },
+    listProcesses: async () => ({ success: true, processes: captured.processes }),
+    openExternal: async (url) => { captured.openExternalCalls.push(url); return { success: true }; },
     onConfirmCommandRequest: () => () => {},
     onAskUserRequest: (cb) => { captured.onAskUserRequest = cb; return () => {}; },
     respondAskUser: async (requestId, answer) => {
@@ -505,4 +510,156 @@ test('dropping a file from Finder attaches it by path rather than re-reading its
   assert.equal(evt.defaultPrevented, true, 'the drop must be swallowed — Electron would otherwise navigate to the file');
   assert.deepEqual(captured.getAttachmentContentCalls, ['/Users/someone/Documents/notes.md']);
   assert.match(document.getElementById('attachments-row').textContent, /notes\.md/);
+});
+
+/**
+ * Preview panel: the chat-side live view of a running project, and the loop back to
+ * the agent (console errors → chat, screenshot → image attachment).
+ *
+ * jsdom has no real <webview>, so these drive the parts that are pure DOM/logic —
+ * panel toggle, URL auto-targeting from a running dev server, error capture and
+ * formatting, and the screenshot→attachment path — with the webview's methods stubbed
+ * where the code guards for them (it already does, for exactly this kind of absence).
+ */
+test('preview panel toggles, auto-targets a running dev server, and closes', async (t) => {
+  const { dom, document, captured } = await bootApp();
+  after(() => dom.window.close());
+
+  // A dev server the agent "started" — run_command records its port in the process
+  // registry, which is where the preview looks first.
+  captured.processes = [
+    { pid: 1, command: 'python -m http.server', port: '8000', status: 'running', startedAt: 1000 },
+    { pid: 2, command: 'npm run dev', port: '5173', status: 'running', startedAt: 2000 },
+  ];
+
+  const panel = document.getElementById('preview-panel');
+
+  await t.test('starts hidden', () => {
+    assert.equal(panel.hidden, true);
+    assert.equal(document.getElementById('preview-resizer').hidden, true);
+  });
+
+  await t.test('opening it targets the most-recently-started server', async () => {
+    document.getElementById('preview-toggle-btn').click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.equal(panel.hidden, false);
+    assert.equal(document.getElementById('preview-toggle-btn').classList.contains('active'), true);
+    // 5173 started later than 8000, so it wins.
+    assert.equal(document.getElementById('preview-url').value, 'http://localhost:5173');
+    assert.ok(document.querySelector('#preview-stage webview'), 'a webview element is created lazily on open');
+  });
+
+  await t.test('closing hides the panel again but keeps the loaded url', () => {
+    document.getElementById('preview-close').click();
+    assert.equal(panel.hidden, true);
+    assert.equal(document.getElementById('preview-toggle-btn').classList.contains('active'), false);
+  });
+});
+
+test('preview falls back to the project index.html when no server is running', async (t) => {
+  const { dom, window, document, captured } = await bootApp();
+  after(() => dom.window.close());
+
+  captured.processes = []; // nothing running
+  // Give the active tab a project path (the app created one initial tab on boot).
+  window.__kodeTestSetProjectPath && window.__kodeTestSetProjectPath('/Users/x/site');
+
+  document.getElementById('preview-toggle-btn').click();
+  await new Promise((r) => setTimeout(r, 20));
+
+  const url = document.getElementById('preview-url').value;
+  // Either a file:// fallback (project path was set) or empty (no project) — never a
+  // bogus server URL when nothing is running.
+  assert.ok(url === '' || url.startsWith('file://'), `unexpected fallback url: ${url}`);
+});
+
+test('typing a bare port in the preview URL bar normalizes to a localhost URL', async (t) => {
+  const { dom, document, captured } = await bootApp();
+  after(() => dom.window.close());
+  captured.processes = [];
+
+  document.getElementById('preview-toggle-btn').click();
+  await new Promise((r) => setTimeout(r, 20));
+
+  const bar = document.getElementById('preview-url');
+  bar.value = '3000';
+  bar.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+
+  assert.equal(bar.value, 'http://localhost:3000');
+});
+
+test('captured preview console errors can be pushed into the chat for the agent to fix', async (t) => {
+  const { dom, window, document, captured } = await bootApp();
+  after(() => dom.window.close());
+  captured.processes = [{ pid: 1, command: 'npm run dev', port: '5173', status: 'running', startedAt: 1 }];
+
+  document.getElementById('preview-toggle-btn').click();
+  await new Promise((r) => setTimeout(r, 20));
+  const wv = document.querySelector('#preview-stage webview');
+
+  // Simulate the guest page emitting a console error and a warning.
+  const err = new window.Event('console-message');
+  Object.assign(err, { level: 3, message: "Uncaught TypeError: x is not a function", sourceId: 'app.js', line: 42 });
+  wv.dispatchEvent(err);
+  const warn = new window.Event('console-message');
+  Object.assign(warn, { level: 2, message: 'Deprecated API used', sourceId: 'vendor.js', line: 7 });
+  wv.dispatchEvent(warn);
+
+  await t.test('the error badge counts them', () => {
+    assert.equal(document.getElementById('preview-error-count').textContent, '2');
+    assert.equal(document.getElementById('preview-console').classList.contains('has-errors'), true);
+  });
+
+  await t.test('sending them drops a ready-to-send message into the chat input', () => {
+    document.getElementById('preview-console').click();
+    const input = document.getElementById('message-input');
+    assert.match(input.value, /console errors\/warnings/);
+    assert.match(input.value, /Uncaught TypeError: x is not a function \(app\.js:42\)/);
+    assert.match(input.value, /\[warning\] Deprecated API used/);
+    // Left in the box for the user to send, not auto-sent.
+    assert.equal(captured.sendMessageCalls.length, 0);
+  });
+});
+
+test('a load failure in the preview is captured as an error too', async (t) => {
+  const { dom, window, document, captured } = await bootApp();
+  after(() => dom.window.close());
+  captured.processes = [{ pid: 1, command: 'npm run dev', port: '5173', status: 'running', startedAt: 1 }];
+
+  document.getElementById('preview-toggle-btn').click();
+  await new Promise((r) => setTimeout(r, 20));
+  const wv = document.querySelector('#preview-stage webview');
+
+  const fail = new window.Event('did-fail-load');
+  Object.assign(fail, { errorCode: -105, errorDescription: 'ERR_NAME_NOT_RESOLVED', validatedURL: 'http://localhost:5173/', isMainFrame: true });
+  wv.dispatchEvent(fail);
+
+  assert.equal(document.getElementById('preview-error-count').textContent, '1');
+
+  // A benign aborted-load (errorCode -3) must NOT be recorded as an error.
+  const aborted = new window.Event('did-fail-load');
+  Object.assign(aborted, { errorCode: -3, errorDescription: 'ERR_ABORTED', validatedURL: 'x', isMainFrame: true });
+  wv.dispatchEvent(aborted);
+  assert.equal(document.getElementById('preview-error-count').textContent, '1', 'an aborted load is not a real failure');
+});
+
+test('screenshotting the preview stages it as an image attachment the model can see', async (t) => {
+  const { dom, document, captured } = await bootApp();
+  after(() => dom.window.close());
+  captured.processes = [{ pid: 1, command: 'npm run dev', port: '5173', status: 'running', startedAt: 1 }];
+
+  document.getElementById('preview-toggle-btn').click();
+  await new Promise((r) => setTimeout(r, 20));
+  const wv = document.querySelector('#preview-stage webview');
+  // Stub the webview capture the way Electron's NativeImage behaves.
+  wv.capturePage = async () => ({ toDataURL: () => 'data:image/png;base64,aGVsbG8=' });
+
+  document.getElementById('preview-screenshot').click();
+  await new Promise((r) => setTimeout(r, 20));
+
+  assert.equal(captured.savePastedImageCalls.length, 1, 'the screenshot is saved like a pasted image');
+  const row = document.getElementById('attachments-row');
+  assert.equal(row.hidden, false);
+  assert.ok(row.querySelector('img.attachment-chip-thumb'), 'it appears as an image chip');
 });

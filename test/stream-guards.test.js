@@ -110,6 +110,78 @@ test('armFirstOutputDeadline fires only when no output ever arrived', async () =
   assert.equal(firedWithOutput, false, 'a request that produced output must be left alone');
 });
 
+// ───────────────── mid-stream teardown always settles (the "reply was never sent" core) ─────────────────
+
+test('a connection that goes silent MID-STREAM is settled, not left hanging', async () => {
+  // The exact "reply was never sent" shape: headers and one chunk arrive, then the
+  // server goes silent forever. The socket idle timeout must tear the request down AND
+  // settle its promise — a req.destroy() that emits no error would leave both this
+  // promise and the send-message IPC waiting on it hung until Electron gave up.
+  const { server, port } = await startServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    res.write('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'); // then silence
+  });
+
+  const err = await new Promise((resolve, reject) => {
+    const req = http.request({ hostname: '127.0.0.1', port, path: '/v1/chat/completions', method: 'POST' }, (res) => {
+      res.on('data', () => {});
+      res.on('end', () => reject(new Error('stream ended normally — expected a mid-stream timeout')));
+      res.on('error', (e) => resolve(guard.mapError(e)));
+    });
+    req.on('error', (e) => resolve(guard.mapError(e)));
+    const guard = guardStreamingRequest(req, { urlPath: '/v1/chat/completions', idleTimeout: 300 });
+    req.end('{}');
+  });
+
+  assert.equal(err.timedOut, true, 'a mid-stream idle must surface as a timeout, never hang');
+  server.close();
+});
+
+test('an abort MID-STREAM is settled, not left hanging', async () => {
+  // The stall-timeout and user-Stop paths both abort via the signal while a response is
+  // actively streaming. That teardown must settle the promise too.
+  const { server, port } = await startServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    res.write('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'); // then silence
+  });
+  const ac = new AbortController();
+
+  const err = await new Promise((resolve, reject) => {
+    const req = http.request({ hostname: '127.0.0.1', port, path: '/x', method: 'POST' }, (res) => {
+      res.on('data', () => {});
+      res.on('end', () => reject(new Error('stream ended normally — expected an abort')));
+      res.on('error', (e) => resolve(guard.mapError(e)));
+    });
+    req.on('error', (e) => resolve(guard.mapError(e)));
+    const guard = guardStreamingRequest(req, { urlPath: '/x', signal: ac.signal, idleTimeout: 5000 });
+    req.end('{}');
+    setTimeout(() => ac.abort(), 50);
+  });
+
+  assert.equal(err.aborted, true);
+  assert.equal(err.message, 'Request aborted');
+  server.close();
+});
+
+test('destroying with an already-aborted signal does not crash with an unhandled error', async () => {
+  // guardStreamingRequest destroys the request synchronously when the signal is already
+  // aborted at call time — before the caller attaches its own error listener. The
+  // destroy error must not surface as an unhandled 'error' event.
+  const { server, port } = await startServer(() => { /* never responds */ });
+  const ac = new AbortController();
+  ac.abort();
+
+  const settled = await new Promise((resolve) => {
+    const req = http.request({ hostname: '127.0.0.1', port, path: '/x', method: 'POST' }, () => {});
+    const guard = guardStreamingRequest(req, { urlPath: '/x', signal: ac.signal });
+    req.on('error', (e) => resolve(guard.mapError(e)));
+    if (guard.aborted) resolve(guard.mapError(new Error('Request aborted')));
+  });
+
+  assert.equal(settled.aborted, true);
+  server.close();
+});
+
 // ───────────────── the stall flag actually reaches the caller ─────────────────
 
 test('CustomClient.chat reports stalled:true when the stall timeout aborts a live but silent stream', async () => {

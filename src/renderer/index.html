@@ -159,6 +159,7 @@
           <span class="elapsed-timer" id="elapsed-timer"></span>
           <span class="token-counter" id="token-counter"></span>
         </div>
+        <button class="preview-toggle-btn" id="preview-toggle-btn" title="Open preview (live view of a running dev server or built page)">👁 Preview</button>
       </header>
 
       <!-- Messages -->
@@ -186,6 +187,42 @@
       </div>
 
     </main>
+
+    <!-- Drag to resize the Preview panel — see setupPanelResizers() in app.js -->
+    <div class="panel-resizer" id="preview-resizer" data-target="preview-panel" title="Drag to resize" hidden></div>
+
+    <!-- ===================== Preview Panel =====================
+         A live view of the project running in a real browser engine (Electron
+         <webview>, hardened in main.js's will-attach-webview). Hidden until the
+         user opens it; auto-targets a dev server started via run_command (its
+         port is already captured by processManager), falling back to the
+         project's index.html. See setupPreview() in app.js. -->
+    <section class="preview-panel" id="preview-panel" hidden>
+      <div class="preview-toolbar">
+        <button class="preview-btn" id="preview-back" title="Back" disabled>‹</button>
+        <button class="preview-btn" id="preview-forward" title="Forward" disabled>›</button>
+        <button class="preview-btn" id="preview-reload" title="Reload">⟳</button>
+        <input type="text" class="preview-url" id="preview-url" placeholder="http://localhost:…" spellcheck="false" autocomplete="off" />
+        <select class="preview-viewport" id="preview-viewport" title="Viewport size">
+          <option value="responsive">Responsive</option>
+          <option value="1280x800">Desktop 1280×800</option>
+          <option value="768x1024">Tablet 768×1024</option>
+          <option value="390x844">Phone 390×844</option>
+        </select>
+        <button class="preview-btn" id="preview-console" title="Send console errors to the chat">🐞 <span id="preview-error-count">0</span></button>
+        <button class="preview-btn" id="preview-screenshot" title="Screenshot the preview and attach it to your next message">📷</button>
+        <button class="preview-btn" id="preview-open-external" title="Open in your browser">↗</button>
+        <button class="preview-btn" id="preview-close" title="Close preview">✕</button>
+      </div>
+      <div class="preview-stage" id="preview-stage">
+        <div class="preview-empty" id="preview-empty">
+          <p>No preview target yet.</p>
+          <p class="preview-empty-hint">Start a dev server (e.g. ask the agent to run <code>npm run dev</code>), or type a URL above.</p>
+        </div>
+        <!-- The <webview> itself is created lazily by app.js so a hidden panel never
+             spins up a renderer process, and it can be fully torn down on close. -->
+      </div>
+    </section>
 
     <!-- Drag to resize the right panel — see setupPanelResizers() in app.js -->
     <div class="panel-resizer" id="right-panel-resizer" data-target="right-panel" title="Drag to resize"></div>

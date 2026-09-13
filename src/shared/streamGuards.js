@@ -61,9 +61,19 @@ const CHARS_PER_TOKEN = 4;
 function guardStreamingRequest(req, { urlPath, signal = null, idleTimeout = SOCKET_IDLE_TIMEOUT } = {}) {
   const state = { aborted: false, timedOut: false };
 
+  // Destroy WITH an explicit error, always. `req.destroy()` with no argument is not
+  // guaranteed to emit an 'error' event on the request — on some Node/Electron builds a
+  // request torn down mid-response settles only via an ECONNRESET the OS happens to
+  // surface, and if it doesn't, the request promise (and the send-message IPC waiting on
+  // it) hangs forever — the exact "reply was never sent" failure. Passing an error makes
+  // the 'error' event fire deterministically on every version; mapError below keys the
+  // caller-visible result off the state flags, not this error's contents, so the flags
+  // set here are what decide whether it reads as a timeout or an abort.
+  const destroy = (err) => { try { req.destroy(err); } catch { /* already destroyed */ } };
+
   req.setTimeout(idleTimeout, () => {
     state.timedOut = true;
-    req.destroy();
+    destroy(new Error('kode: socket idle timeout'));
   });
 
   // Detect a peer that went away without closing the connection (the case a socket
@@ -77,11 +87,11 @@ function guardStreamingRequest(req, { urlPath, signal = null, idleTimeout = SOCK
   if (signal) {
     if (signal.aborted) {
       state.aborted = true;
-      req.destroy();
+      destroy(new Error('kode: aborted'));
     } else {
       signal.addEventListener('abort', () => {
         state.aborted = true;
-        req.destroy();
+        destroy(new Error('kode: aborted'));
       }, { once: true });
     }
   }

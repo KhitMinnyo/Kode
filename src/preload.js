@@ -270,6 +270,13 @@ contextBridge.exposeInMainWorld('kode', {
   /** List background processes started via run_command, running or recently exited. */
   listProcesses: () => ipcRenderer.invoke('list-processes'),
 
+  /**
+   * Open a URL in the user's real browser (Preview panel's "open in browser" button).
+   * Restricted to http/https/file in the main process.
+   * @param {string} url
+   */
+  openExternal: (url) => ipcRenderer.invoke('open-external', url),
+
   /** Get the full buffered log for a background process by PID. */
   getProcessLog: (pid) => ipcRenderer.invoke('get-process-log', pid),
 
