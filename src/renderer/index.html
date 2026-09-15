@@ -296,6 +296,10 @@
               <span class="tab-icon">🌐</span>
               OpenRouter
             </button>
+            <button class="provider-tab" data-provider="lmstudio" id="tab-lmstudio">
+              <span class="tab-icon">🖥️</span>
+              LM Studio (Local)
+            </button>
             <button class="provider-tab" data-provider="custom" id="tab-custom">
               <span class="tab-icon">🧩</span>
               Other (Custom)
@@ -495,6 +499,32 @@
           <div class="connection-result" id="openrouter-result"></div>
         </div>
 
+        <!-- LM Studio Config — a local OpenAI-compatible server (lmstudio.ai). No API
+             key; the base URL is editable because LM Studio's server port is configurable
+             (Developer tab → Start Server). -->
+        <div class="provider-config" id="config-lmstudio">
+          <div class="settings-group">
+            <div class="settings-group-title">
+              <span class="group-icon">🖥️</span>
+              LM Studio (Local)
+            </div>
+            <div class="settings-field">
+              <label for="lmstudio-base-url">Server URL</label>
+              <input type="text" id="lmstudio-base-url" placeholder="http://localhost:1234/v1" />
+              <span class="field-hint">🔗 In LM Studio, open the <strong>Developer</strong> tab and <strong>Start Server</strong>, then load a model. Default is <strong>localhost:1234</strong>. To reach it over the LAN (Kali → Mac) just enter the machine's <strong>IP and port</strong> — e.g. <strong>192.168.1.100:1234</strong>. The <code>http://</code> and <code>/v1</code> are added automatically if you leave them off.</span>
+            </div>
+            <div class="settings-field">
+              <label for="lmstudio-context-size">Context Window (tokens)</label>
+              <input type="number" id="lmstudio-context-size" placeholder="8192" value="8192" min="512" step="512" />
+              <span class="field-hint">💡 Set this to match the context length of the model you loaded in LM Studio so long conversations get trimmed correctly.</span>
+            </div>
+          </div>
+          <button class="test-connection-btn" id="test-lmstudio-btn">
+            <span>🔍</span> Test Connection
+          </button>
+          <div class="connection-result" id="lmstudio-result"></div>
+        </div>
+
         <!-- Custom (Other OpenAI-compatible API) Config -->
         <div class="provider-config" id="config-custom">
           <div class="settings-group">
@@ -505,7 +535,7 @@
             <div class="settings-field">
               <label for="custom-base-url">Base URL</label>
               <input type="text" id="custom-base-url" placeholder="https://api.groq.com/openai/v1" />
-              <span class="field-hint">🔗 Works with any OpenAI-compatible API — Groq, OpenRouter, Together AI, Mistral, Fireworks, xAI, Perplexity, or a local server (LM Studio, vLLM, llama.cpp server). Enter its base URL including the version path (usually ending in <strong>/v1</strong>).</span>
+              <span class="field-hint">🔗 Works with any OpenAI-compatible API — Groq, OpenRouter, Together AI, Mistral, Fireworks, xAI, Perplexity, or a local server (LM Studio, vLLM, llama.cpp server). Enter its base URL including the version path (usually ending in <strong>/v1</strong>). For a LAN server you can enter just an <strong>IP and port</strong> like <strong>192.168.1.100:8000/v1</strong> — the <code>http://</code> is added automatically.</span>
             </div>
             <div class="settings-field">
               <label for="custom-key">API Key (optional — leave blank for local servers with no auth)</label>

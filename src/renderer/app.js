@@ -78,7 +78,7 @@
   }
 
   /** Human-readable label per provider — shared by the connection status pill and Settings. */
-  const PROVIDER_LABELS = { ollama: 'Ollama', deepseek: 'DeepSeek', openai: 'OpenAI', anthropic: 'Claude', openrouter: 'OpenRouter', custom: 'Custom API' };
+  const PROVIDER_LABELS = { ollama: 'Ollama', lmstudio: 'LM Studio', deepseek: 'DeepSeek', openai: 'OpenAI', anthropic: 'Claude', openrouter: 'OpenRouter', custom: 'Custom API' };
 
   /**
    * Basic debounce — delays invoking `fn` until `wait` ms have passed without
@@ -2924,6 +2924,7 @@
     const tabOpenai = document.getElementById('tab-openai');
     const tabAnthropic = document.getElementById('tab-anthropic');
     const tabOpenrouter = document.getElementById('tab-openrouter');
+    const tabLmstudio = document.getElementById('tab-lmstudio');
     const tabCustom = document.getElementById('tab-custom');
 
     if (tabOllama) tabOllama.addEventListener('click', () => switchProviderTab('ollama'));
@@ -2931,6 +2932,7 @@
     if (tabOpenai) tabOpenai.addEventListener('click', () => switchProviderTab('openai'));
     if (tabAnthropic) tabAnthropic.addEventListener('click', () => switchProviderTab('anthropic'));
     if (tabOpenrouter) tabOpenrouter.addEventListener('click', () => switchProviderTab('openrouter'));
+    if (tabLmstudio) tabLmstudio.addEventListener('click', () => switchProviderTab('lmstudio'));
     if (tabCustom) tabCustom.addEventListener('click', () => switchProviderTab('custom'));
 
     // Test buttons
@@ -2939,6 +2941,7 @@
     const testOpenai = document.getElementById('test-openai-btn');
     const testAnthropic = document.getElementById('test-anthropic-btn');
     const testOpenrouter = document.getElementById('test-openrouter-btn');
+    const testLmstudio = document.getElementById('test-lmstudio-btn');
     const testCustom = document.getElementById('test-custom-btn');
 
     if (testOllama) testOllama.addEventListener('click', testOllamaConnection);
@@ -2946,6 +2949,7 @@
     if (testOpenai) testOpenai.addEventListener('click', testOpenaiConnection);
     if (testAnthropic) testAnthropic.addEventListener('click', testAnthropicConnection);
     if (testOpenrouter) testOpenrouter.addEventListener('click', testOpenrouterConnection);
+    if (testLmstudio) testLmstudio.addEventListener('click', testLmstudioConnection);
     if (testCustom) testCustom.addEventListener('click', testCustomConnection);
 
     // API key visibility toggles — same pattern for all cloud/custom providers
@@ -2990,6 +2994,8 @@
       const customBaseUrlInput = document.getElementById('custom-base-url');
       const customKeyInput = document.getElementById('custom-key');
       const customContextInput = document.getElementById('custom-context-size');
+      const lmstudioBaseUrlInput = document.getElementById('lmstudio-base-url');
+      const lmstudioContextInput = document.getElementById('lmstudio-context-size');
       const contextInput = document.getElementById('max-context-tokens');
       const toolIterationsInput = document.getElementById('max-tool-iterations');
       const confirmRiskyInput = document.getElementById('confirm-risky-commands');
@@ -3005,6 +3011,8 @@
       if (customBaseUrlInput) customBaseUrlInput.value = settings.customBaseUrl || '';
       if (customKeyInput) customKeyInput.value = settings.customApiKey || '';
       if (customContextInput) customContextInput.value = String(settings.customContextSize || 32768);
+      if (lmstudioBaseUrlInput) lmstudioBaseUrlInput.value = settings.lmstudioBaseUrl || 'http://localhost:1234/v1';
+      if (lmstudioContextInput) lmstudioContextInput.value = String(settings.lmstudioContextSize || 8192);
       if (contextInput) contextInput.value = String(settings.maxContextTokens || 16384);
       if (toolIterationsInput) toolIterationsInput.value = String(settings.maxToolIterations || 25);
       if (confirmRiskyInput) confirmRiskyInput.checked = settings.confirmRiskyCommands !== false;
@@ -3039,6 +3047,7 @@
     document.getElementById('config-openai')?.classList.toggle('active', provider === 'openai');
     document.getElementById('config-anthropic')?.classList.toggle('active', provider === 'anthropic');
     document.getElementById('config-openrouter')?.classList.toggle('active', provider === 'openrouter');
+    document.getElementById('config-lmstudio')?.classList.toggle('active', provider === 'lmstudio');
     document.getElementById('config-custom')?.classList.toggle('active', provider === 'custom');
 
     // "Max Context Window" (agent/core.js's maxContextCap) only ever applies to Ollama
@@ -3203,8 +3212,45 @@
     }
   }
 
+  /** LM Studio: a local server needing only a base URL (no key), like Custom. */
+  async function testLmstudioConnection() {
+    const btn = document.getElementById('test-lmstudio-btn');
+    const resultEl = document.getElementById('lmstudio-result');
+    const baseUrl = document.getElementById('lmstudio-base-url')?.value?.trim() || '';
+    if (!btn || !resultEl) return;
+
+    if (!baseUrl) {
+      resultEl.className = 'connection-result visible error';
+      resultEl.textContent = '❌ Please enter the LM Studio server URL';
+      return;
+    }
+
+    btn.classList.add('testing');
+    btn.innerHTML = '<span>⏳</span> Testing...';
+    resultEl.className = 'connection-result';
+    resultEl.classList.remove('visible');
+
+    try {
+      const result = await window.kode.testConnection({ provider: 'lmstudio', lmstudioBaseUrl: baseUrl });
+      resultEl.classList.add('visible');
+      if (result.connected) {
+        resultEl.className = 'connection-result visible success';
+        resultEl.textContent = '✅ Connected — make sure a model is loaded in LM Studio.';
+      } else {
+        resultEl.className = 'connection-result visible error';
+        resultEl.textContent = `❌ ${result.error || 'Connection failed'} — is the LM Studio server started?`;
+      }
+    } catch (err) {
+      resultEl.className = 'connection-result visible error';
+      resultEl.textContent = `❌ Error: ${err.message}`;
+    } finally {
+      btn.classList.remove('testing');
+      btn.innerHTML = '<span>🔍</span> Test Connection';
+    }
+  }
+
   function clearTestResults() {
-    ['ollama-result', 'deepseek-result', 'openai-result', 'anthropic-result', 'openrouter-result', 'custom-result'].forEach(id => {
+    ['ollama-result', 'deepseek-result', 'openai-result', 'anthropic-result', 'openrouter-result', 'lmstudio-result', 'custom-result'].forEach(id => {
       const el = document.getElementById(id);
       if (el) {
         el.className = 'connection-result';
@@ -3224,6 +3270,8 @@
     const customBaseUrl = document.getElementById('custom-base-url')?.value?.trim() || '';
     const customApiKey = document.getElementById('custom-key')?.value?.trim() || '';
     const customContextSize = parseInt(document.getElementById('custom-context-size')?.value, 10) || 32768;
+    const lmstudioBaseUrl = document.getElementById('lmstudio-base-url')?.value?.trim() || 'http://localhost:1234/v1';
+    const lmstudioContextSize = parseInt(document.getElementById('lmstudio-context-size')?.value, 10) || 8192;
     const maxContextTokens = parseInt(document.getElementById('max-context-tokens')?.value, 10) || 16384;
     const maxToolIterations = parseInt(document.getElementById('max-tool-iterations')?.value, 10) || 25;
     const confirmRiskyCommands = document.getElementById('confirm-risky-commands')?.checked !== false;
@@ -3242,6 +3290,8 @@
         customBaseUrl,
         customApiKey,
         customContextSize,
+        lmstudioBaseUrl,
+        lmstudioContextSize,
         maxContextTokens,
         maxToolIterations,
         confirmRiskyCommands,

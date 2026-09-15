@@ -96,6 +96,7 @@ async function bootApp() {
     savePastedImageCalls: [],
     getAttachmentContentCalls: [],
     openExternalCalls: [],
+    saveSettingsCalls: [],
     processes: [],  // a test can set this before opening the preview
 
     onStreamToken: null,
@@ -115,6 +116,7 @@ async function bootApp() {
     getProjects: async () => ({ projects: [], activeIndex: -1 }),
     getChats: async () => ({ chats: [], activeChatId: null }),
     getSettings: async () => ({ maxContextTokens: 16384 }),
+    saveSettings: async (s) => { captured.saveSettingsCalls.push(s); return { success: true, settings: s }; },
     warmModel: async () => ({ success: true }),
     setActiveProject: async (index) => ({ success: true, activeIndex: index }),
     createChat: async ({ title, model, projectPath }) => {
@@ -662,4 +664,42 @@ test('screenshotting the preview stages it as an image attachment the model can 
   const row = document.getElementById('attachments-row');
   assert.equal(row.hidden, false);
   assert.ok(row.querySelector('img.attachment-chip-thumb'), 'it appears as an image chip');
+});
+
+
+/**
+ * LM Studio provider: a local OpenAI-compatible server wired in like Ollama. Verifies
+ * the Settings UI exposes it and round-trips its own fields (base URL + context size),
+ * which is what lets a user point Kode at LM Studio instead of Ollama.
+ */
+test('LM Studio settings tab switches in and saves its own fields', async (t) => {
+  const { dom, document, captured } = await bootApp();
+  after(() => dom.window.close());
+
+  document.getElementById('settings-btn').click();
+  await new Promise((r) => setTimeout(r, 20));
+
+  await t.test('the LM Studio provider tab and its config panel exist', () => {
+    assert.ok(document.getElementById('tab-lmstudio'), 'LM Studio provider tab is present');
+    assert.ok(document.getElementById('config-lmstudio'), 'LM Studio config panel is present');
+  });
+
+  await t.test('selecting it reveals its config with the default local URL', () => {
+    document.getElementById('tab-lmstudio').click();
+    assert.ok(document.getElementById('config-lmstudio').classList.contains('active'));
+    assert.equal(document.getElementById('lmstudio-base-url').value, 'http://localhost:1234/v1');
+  });
+
+  await t.test('saving persists the LM Studio provider, URL and context size', async () => {
+    document.getElementById('lmstudio-base-url').value = 'http://192.168.1.50:1234/v1';
+    document.getElementById('lmstudio-context-size').value = '16384';
+    document.getElementById('settings-save-btn').click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.equal(captured.saveSettingsCalls.length, 1);
+    const s = captured.saveSettingsCalls[0];
+    assert.equal(s.provider, 'lmstudio');
+    assert.equal(s.lmstudioBaseUrl, 'http://192.168.1.50:1234/v1');
+    assert.equal(s.lmstudioContextSize, 16384);
+  });
 });

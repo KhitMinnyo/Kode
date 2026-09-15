@@ -63,7 +63,14 @@ class CustomClient {
    * fails with a clear message rather than throwing deep inside Node's http/https.
    */
   updateBaseUrl(newBaseUrl) {
-    this.baseUrl = (newBaseUrl || '').trim().replace(/\/+$/, '');
+    let url = (newBaseUrl || '').trim().replace(/\/+$/, '');
+    // Accept a scheme-less host — someone entering just an IP:port for a LAN server
+    // (e.g. "192.168.1.100:1234/v1", or "localhost:1234") shouldn't have to remember
+    // the "http://". new URL() rejects those outright (it reads "192.168.1.100:" as a
+    // bogus scheme), which is exactly why a bare IP:port silently failed to connect.
+    // Anything that already carries a real scheme (http://, https://) is left as-is.
+    if (url && !/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) url = `http://${url}`;
+    this.baseUrl = url;
     this._parsedBase = null;
     if (!this.baseUrl) return;
     try {

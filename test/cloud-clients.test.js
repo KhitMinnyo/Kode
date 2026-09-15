@@ -228,6 +228,26 @@ test('CustomClient parses an http (local server) base URL and defaults its port 
   assert.equal(client._parsedBase.pathPrefix, '/v1');
 });
 
+test('CustomClient accepts a scheme-less IP:port so a LAN server connects without typing http://', () => {
+  // The exact "bare IP:port silently fails to connect" bug: new URL() rejects
+  // "192.168.1.100:1234" (it reads the address as a bogus scheme), so a user pointing
+  // Kode at a Mac's local server from Kali got nothing. The scheme is now filled in.
+  const c1 = new CustomClient('', '192.168.1.100:1234/v1');
+  assert.equal(c1._parsedBase.hostname, '192.168.1.100');
+  assert.equal(c1._parsedBase.port, '1234');
+  assert.equal(c1._parsedBase.pathPrefix, '/v1');
+
+  const c2 = new CustomClient('', 'localhost:1234');
+  assert.equal(c2._parsedBase.hostname, 'localhost');
+  assert.equal(c2._parsedBase.port, '1234');
+
+  // A real scheme is never doubled up.
+  const c3 = new CustomClient('', 'https://api.groq.com/openai/v1');
+  assert.equal(c3._parsedBase.hostname, 'api.groq.com');
+  assert.equal(c3._parsedBase.port, 443); // default https port is a number, not a string
+  assert.equal(c3._parsedBase.pathPrefix, '/openai/v1');
+});
+
 test('CustomClient falls back to a safe default context size on invalid input', () => {
   const client = new CustomClient('', 'https://example.com/v1', 'not-a-number');
   assert.equal(client.contextSize, 32768);

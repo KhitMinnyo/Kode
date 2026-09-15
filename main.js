@@ -25,6 +25,15 @@ const agentTools = require('./src/agent/tools'); // reused directly for reading 
 const GITHUB_REPO = 'KhitMinnyo/Kode';
 
 const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
+
+// LM Studio (https://lmstudio.ai) runs a local OpenAI-compatible server — same wire
+// shape as Ollama, just OpenAI-style — so it's a dedicated provider fronted by the
+// generic CustomClient, pre-pointed at LM Studio's default local endpoint. No API key
+// (it's a local server); the base URL is user-editable because LM Studio's server port
+// is configurable. Unlike the always-native cloud providers, its tool-calling is
+// decided by the same model-family heuristic as Ollama (see supportsNativeToolCalling)
+// since it runs the same kind of local GGUF models.
+const { LMSTUDIO_BASE_URL, LMSTUDIO_DEFAULT_CONTEXT_SIZE, normalizeLmStudioUrl } = require('./src/shared/lmstudio');
 // OpenRouter fronts models with wildly different context windows (8K to 2M+); this
 // is a single reasonable guess used for history-budgeting when the exact model's
 // real limit isn't otherwise known — same tradeoff OpenAIClient/AnthropicClient
@@ -180,7 +189,7 @@ function loadSettings() {
 
 function getDefaultSettings() {
   return {
-    provider: 'ollama',          // 'ollama' | 'deepseek' | 'openai' | 'anthropic' | 'openrouter' | 'custom'
+    provider: 'ollama',          // 'ollama' | 'lmstudio' | 'deepseek' | 'openai' | 'anthropic' | 'openrouter' | 'custom'
     ollamaHost: 'localhost',     // Ollama server hostname/IP
     ollamaPort: 11434,           // Ollama server port
     deepseekApiKey: '',          // DeepSeek API key
@@ -190,6 +199,8 @@ function getDefaultSettings() {
     customApiKey: '',            // API key for the custom OpenAI-compatible provider (optional — many self-hosted servers don't need one)
     customBaseUrl: '',           // Base URL for the custom provider, e.g. https://api.groq.com/openai/v1
     customContextSize: 32768,    // Assumed context window for the custom provider — not auto-detectable, see src/custom/client.js
+    lmstudioBaseUrl: LMSTUDIO_BASE_URL,   // LM Studio local server base URL (port is user-configurable in LM Studio)
+    lmstudioContextSize: LMSTUDIO_DEFAULT_CONTEXT_SIZE, // Assumed context window for LM Studio — set to match the loaded model
     maxContextTokens: 16384,     // Context-size ceiling; raise for large-context models (e.g. Qwen3.6)
     maxToolIterations: 50,       // Per-turn safety cap on model↔tool round-trips (see AgentCore). Raise for long multi-file tasks; a cloud model can run much longer than a local one.
     confirmRiskyCommands: true,  // Pause run_command's "risky but allowed" tier (curl|sh, base64->sh, etc.) for user approval — see src/agent/tools.js
@@ -327,6 +338,7 @@ let openaiClient = new OpenAIClient(appSettings.openaiApiKey || '');
 let anthropicClient = new AnthropicClient(appSettings.anthropicApiKey || '');
 let openrouterClient = new CustomClient(appSettings.openrouterApiKey || '', OPENROUTER_BASE_URL, OPENROUTER_DEFAULT_CONTEXT_SIZE);
 let customClient = new CustomClient(appSettings.customApiKey || '', appSettings.customBaseUrl || '', appSettings.customContextSize || 32768);
+let lmstudioClient = new CustomClient('', normalizeLmStudioUrl(appSettings.lmstudioBaseUrl), appSettings.lmstudioContextSize || LMSTUDIO_DEFAULT_CONTEXT_SIZE);
 
 // Active client depends on provider setting
 function getActiveClient() {
@@ -335,6 +347,7 @@ function getActiveClient() {
     case 'openai': return openaiClient;
     case 'anthropic': return anthropicClient;
     case 'openrouter': return openrouterClient;
+    case 'lmstudio': return lmstudioClient;
     case 'custom': return customClient;
     default: return ollamaClient;
   }
@@ -362,6 +375,7 @@ function createClientForActiveProvider() {
     case 'anthropic': return new AnthropicClient(appSettings.anthropicApiKey || '');
     case 'openrouter': return new CustomClient(appSettings.openrouterApiKey || '', OPENROUTER_BASE_URL, OPENROUTER_DEFAULT_CONTEXT_SIZE);
     case 'custom': return new CustomClient(appSettings.customApiKey || '', appSettings.customBaseUrl || '', appSettings.customContextSize || 32768);
+    case 'lmstudio': return new CustomClient('', normalizeLmStudioUrl(appSettings.lmstudioBaseUrl), appSettings.lmstudioContextSize || LMSTUDIO_DEFAULT_CONTEXT_SIZE);
     default: return new OllamaClient(buildOllamaUrl(appSettings.ollamaHost, appSettings.ollamaPort));
   }
 }
@@ -377,6 +391,10 @@ function applySettingsToClient(client, provider) {
       client.updateApiKey(appSettings.customApiKey || '');
       client.updateBaseUrl(appSettings.customBaseUrl || '');
       client.updateContextSize(appSettings.customContextSize || 32768);
+      break;
+    case 'lmstudio':
+      client.updateBaseUrl(normalizeLmStudioUrl(appSettings.lmstudioBaseUrl));
+      client.updateContextSize(appSettings.lmstudioContextSize || LMSTUDIO_DEFAULT_CONTEXT_SIZE);
       break;
     default: client.updateBaseUrl(buildOllamaUrl(appSettings.ollamaHost, appSettings.ollamaPort));
   }
@@ -1356,6 +1374,8 @@ ${err.message}`;
       customClient.updateApiKey(appSettings.customApiKey || '');
       customClient.updateBaseUrl(appSettings.customBaseUrl || '');
       customClient.updateContextSize(appSettings.customContextSize || 32768);
+      lmstudioClient.updateBaseUrl(normalizeLmStudioUrl(appSettings.lmstudioBaseUrl));
+      lmstudioClient.updateContextSize(appSettings.lmstudioContextSize || LMSTUDIO_DEFAULT_CONTEXT_SIZE);
 
       // Propagate the (possibly changed) provider/keys/context-cap to every open
       // tab's own AgentCore + client — see the Per-Tab Agent Registry above.
@@ -1371,7 +1391,7 @@ ${err.message}`;
   /**
    * Test connection to a specific host (without saving)
    */
-  ipcMain.handle('test-connection', async (event, { provider, ollamaHost, ollamaPort, deepseekApiKey, openaiApiKey, anthropicApiKey, openrouterApiKey, customApiKey, customBaseUrl }) => {
+  ipcMain.handle('test-connection', async (event, { provider, ollamaHost, ollamaPort, deepseekApiKey, openaiApiKey, anthropicApiKey, openrouterApiKey, customApiKey, customBaseUrl, lmstudioBaseUrl }) => {
     try {
       let testClient;
       switch (provider) {
@@ -1380,6 +1400,7 @@ ${err.message}`;
         case 'anthropic': testClient = new AnthropicClient(anthropicApiKey || ''); break;
         case 'openrouter': testClient = new CustomClient(openrouterApiKey || '', OPENROUTER_BASE_URL); break;
         case 'custom': testClient = new CustomClient(customApiKey || '', customBaseUrl || ''); break;
+        case 'lmstudio': testClient = new CustomClient('', normalizeLmStudioUrl(lmstudioBaseUrl)); break;
         default: testClient = new OllamaClient(buildOllamaUrl(ollamaHost, ollamaPort));
       }
       return await testClient.checkConnection();
