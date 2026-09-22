@@ -28,7 +28,7 @@ xattr -cr /Applications/Kode.app
 Download `Kode-<version>-x64.exe` (or `-arm64.exe` on an ARM device). Windows tags every downloaded file with a "came from the internet" mark, and SmartScreen refuses to run an unsigned installer carrying it. Clearing that mark is the direct equivalent of macOS's `xattr -cr`:
 
 ```powershell
-Unblock-File -Path .\Kode-1.1.5-x64.exe
+Unblock-File -Path .\Kode-1.1.6-x64.exe
 ```
 
 Without PowerShell: right-click the `.exe` → **Properties** → tick **Unblock** → **OK**.
@@ -128,13 +128,13 @@ npm start
 ### Build macOS App
 ```bash
 npm run build
-# → dist/Kode-1.1.5-universal.dmg (Apple Silicon + Intel)
+# → dist/Kode-1.1.6-universal.dmg (Apple Silicon + Intel)
 ```
 
 ### Build Windows App
 ```bash
 npm run build:win
-# → dist/Kode-1.1.5-x64.exe, dist/Kode-1.1.5-arm64.exe  (NSIS installers)
+# → dist/Kode-1.1.6-x64.exe, dist/Kode-1.1.6-arm64.exe  (NSIS installers)
 ```
 Cross-building a Windows installer from macOS works for the unsigned case; sign on Windows (or in CI — `.github/workflows/build-win.yml`) when you have a certificate.
 
