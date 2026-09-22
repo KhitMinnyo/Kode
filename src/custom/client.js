@@ -314,6 +314,7 @@ class CustomClient {
       messages: this._normalizeMessages(messages),
       stream: true,
       temperature: opts.temperature !== undefined ? opts.temperature : 0.7,
+      max_tokens: opts.maxTokens || 32768,
     };
     if (Array.isArray(opts.tools) && opts.tools.length > 0) {
       requestBody.tools = opts.tools;

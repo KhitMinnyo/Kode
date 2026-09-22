@@ -4,6 +4,7 @@ const { getSystemPrompt, getAvailableToolNames, supportsNativeToolCalling } = re
 const tools = require('./tools');
 const memory = require('./memory');
 const plan = require('./plan');
+const taskState = require('./taskState');
 const contextCache = require('./contextCache');
 const embeddings = require('./embeddings');
 const {
@@ -250,7 +251,9 @@ function convertNativeToolCalls(nativeToolCalls) {
     }
     if (!params || typeof params !== 'object') params = {};
 
-    converted.push({ tool: fn.name, params });
+    const convertedCall = { tool: fn.name, params };
+    if (call.id || fn.id) convertedCall.id = call.id || fn.id;
+    converted.push(convertedCall);
   }
   return converted;
 }
@@ -284,8 +287,11 @@ class AgentCore {
     this._toolAbortController = null;
     this._contextSizeCache = {};  // model → context_size cache
     this.maxContextCap = maxContextCap; // user-configurable ceiling, see setMaxContextCap()
+    // Only clients that support this provider option send it over the wire.
+    this.reasoningEffort = 'medium';
     this._contextSummaryCache = {};  // conversation fingerprint → { droppedCount, summary }
     this._projectScanCache = {};     // projectFolder → { fingerprint, context } (see _scanProjectContext)
+    this._taskState = null;
     // Which backend `this.ollamaClient` currently points at: 'ollama' | 'deepseek' |
     // 'openai' | 'anthropic'. Despite the property name (kept for backward
     // compatibility), it holds whichever client main.js's getActiveClient() selected.
@@ -351,6 +357,12 @@ class AgentCore {
   setMaxToolIterations(maxToolIterations) {
     this.maxToolIterations = this._sanitizeMaxToolIterations(maxToolIterations);
     console.log(`[AgentCore] Max tool iterations set to ${this.maxToolIterations}`);
+  }
+
+  /** Update provider-specific generation controls without changing the constructor API. */
+  setGenerationOptions(options = {}) {
+    const effort = String(options.reasoningEffort || '').trim().toLowerCase();
+    if (['low', 'medium', 'high'].includes(effort)) this.reasoningEffort = effort;
   }
 
   /**
@@ -666,7 +678,7 @@ ${newlyDroppedText}`;
           result = `❌ Tool execution error (${call.tool}): ${err.message}`;
         }
       }
-      return { tool: call.tool, params: call.params, result };
+      return { tool: call.tool, params: call.params, result, callId: call.id || null };
     };
 
     let i = 0;
@@ -782,8 +794,9 @@ ${newlyDroppedText}`;
     // it's naturally bounded to at most MAX_VERIFY_NUDGES + 1 runs per turn, and it's
     // the only way to confirm the model's fix attempt actually worked rather than
     // trusting a repeated "✅ Done" claim on faith.
-    if (this._hasRealTestScript(projectFolder)) {
-      const testResult = await tools.run_tests({}, projectFolder, {});
+    const verificationCommand = this._getVerificationCommand(projectFolder);
+    if (verificationCommand) {
+      const testResult = await tools.run_tests({ command: verificationCommand }, projectFolder, {});
       if (typeof testResult === 'string' && testResult.startsWith('❌')) {
         return `The test suite failed after your changes:\n${testResult}`;
       }
@@ -792,25 +805,39 @@ ${newlyDroppedText}`;
     return null;
   }
 
-  /**
-   * True when projectFolder has a package.json with a real `test` script — i.e. NOT
-   * missing, and not npm init's default placeholder ("echo \"Error: no test
-   * specified\" && exit 1"). Guards _verifyDoneClaim so it never invents test work
-   * for a project that doesn't actually have a test suite.
-   */
-  _hasRealTestScript(projectFolder) {
+  /** Select a project-native verification command instead of assuming every project is npm. */
+  _getVerificationCommand(projectFolder) {
     const fs = require('fs');
     const path = require('path');
     try {
       const pkgPath = path.join(projectFolder, 'package.json');
-      if (!fs.existsSync(pkgPath)) return false;
-      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
-      const testScript = pkg.scripts && pkg.scripts.test;
-      if (!testScript || typeof testScript !== 'string') return false;
-      return !/Error:\s*no test specified/i.test(testScript);
+      if (fs.existsSync(pkgPath)) {
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+        const testScript = pkg.scripts && pkg.scripts.test;
+        if (typeof testScript === 'string' && testScript && !/Error:\s*no test specified/i.test(testScript)) {
+          if (fs.existsSync(path.join(projectFolder, 'pnpm-lock.yaml'))) return 'pnpm test';
+          if (fs.existsSync(path.join(projectFolder, 'yarn.lock'))) return 'yarn test';
+          if (fs.existsSync(path.join(projectFolder, 'bun.lockb')) || fs.existsSync(path.join(projectFolder, 'bun.lock'))) return 'bun test';
+          return 'npm test';
+        }
+      }
+      if (fs.existsSync(path.join(projectFolder, 'pyproject.toml')) ||
+          fs.existsSync(path.join(projectFolder, 'pytest.ini')) ||
+          fs.existsSync(path.join(projectFolder, 'setup.cfg'))) return 'python3 -m pytest';
+      if (fs.existsSync(path.join(projectFolder, 'Cargo.toml'))) return 'cargo test';
+      if (fs.existsSync(path.join(projectFolder, 'go.mod'))) return 'go test ./...';
+
+      const makefile = path.join(projectFolder, 'Makefile');
+      if (fs.existsSync(makefile) && /^test\s*:/m.test(fs.readFileSync(makefile, 'utf-8'))) return 'make test';
+      return null;
     } catch {
-      return false;
+      return null;
     }
+  }
+
+  /** Backward-compatible boolean helper for integrations that only need a yes/no answer. */
+  _hasRealTestScript(projectFolder) {
+    return Boolean(this._getVerificationCommand(projectFolder));
   }
 
   /**
@@ -830,6 +857,11 @@ ${newlyDroppedText}`;
       'ဆက်', 'ပြီးအောင်', 'ပြင်', 'စစ်', 'ရှာ',
     ];
     return message.length < 200 && triggers.some(t => lower.includes(t));
+  }
+
+  /** Requests whose normal meaning includes changing or completing project work. */
+  _likelyNeedsChanges(message = '') {
+    return /\b(fix|implement|add|create|update|modify|remove|refactor|finish|complete|improve|build|migrate|rewrite)\b|ပြီးအောင်|ပြင်|ထည့်|ဖန်တီး/i.test(message);
   }
 
   /**
@@ -1084,7 +1116,17 @@ ${newlyDroppedText}`;
       // Build messages array with system prompt prepended (model-aware for security
       // models, and message-aware so the large pentest/red-team playbook is only
       // included when this task actually looks security-related — see prompts.js).
-      const systemMessage = { role: 'system', content: getSystemPrompt(projectFolder, model, userMessage) };
+      const persistedTask = projectFolder ? taskState.loadTaskState(projectFolder) : null;
+      const isContinuation = /\b(continue|finish|complete|resume|pick up)\b|ဆက်|ပြီးအောင်/i.test(userMessage);
+      this._taskState = persistedTask && persistedTask.status === 'in_progress' && isContinuation
+        ? { ...persistedTask, request: `${persistedTask.request}\nContinuation: ${userMessage}` }
+        : taskState.createTaskState(userMessage);
+      if (projectFolder) taskState.saveTaskState(projectFolder, this._taskState);
+
+      const systemMessage = {
+        role: 'system',
+        content: getSystemPrompt(projectFolder, model, userMessage, this._taskState),
+      };
 
       let iteration = 0;
       let finalResponse = '';
@@ -1127,6 +1169,13 @@ ${newlyDroppedText}`;
         // everyone else keeps using the markdown ```tool``` block convention from the
         // system prompt (parsed by parseToolCalls below).
         const useNativeTools = supportsNativeToolCalling(model, this.provider);
+        const proseTask = /\b(essay|article|blog|story|report|proposal|letter|email|documentation|readme|rewrite|translate|proofread|draft|summarize)\b|စာရေး|ဆောင်းပါး|အစီရင်ခံစာ|ဘာသာပြန်|ပြန်ရေး|အကျဉ်းချုပ်/i.test(userMessage);
+        // Tool arguments often contain complete file contents. The old implicit
+        // provider defaults (especially Ollama's 2K prediction cap) could truncate a
+        // valid edit halfway through. Keep coding focused, but reserve substantially
+        // more output for complete tool calls and long-form writing.
+        const maxOutputTokens = Math.max(4096, Math.min(32768, Math.floor(maxContextSize * (proseTask ? 0.7 : 0.6))));
+        const temperature = proseTask ? 0.55 : 0.25;
 
         console.log(`[AgentCore] Iteration ${iteration}: ${messages.length} messages, ~${neededTokens} tokens (num_ctx: ${numCtx}/${maxContextSize}, native tools: ${useNativeTools})`);
 
@@ -1157,6 +1206,9 @@ ${newlyDroppedText}`;
         }, {
           contextSize: numCtx,
           tools: useNativeTools ? TOOL_SCHEMAS : undefined,
+          maxTokens: maxOutputTokens,
+          temperature,
+          reasoningEffort: this.reasoningEffort,
           onProgress: (progress) => {
             if (progress.event === 'progress') {
               onStatus({ status: 'generating', message: `Generating... ${progress.tokensPerSec} tok/s` });
@@ -1238,8 +1290,24 @@ ${newlyDroppedText}`;
 
         // Parse tool calls: prefer structured native tool_calls when the model returned
         // them; otherwise fall back to the markdown ```tool``` block convention.
-        const toolCalls = nativeToolCalls.length > 0
-          ? convertNativeToolCalls(nativeToolCalls)
+        // Give providers that omit an id a stable id so native tool results can be
+        // correlated in the next request. This is required by OpenAI-style APIs and
+        // makes retries/parallel calls unambiguous for Anthropic adapters.
+        const normalizedNativeToolCalls = nativeToolCalls.map((call, index) => {
+          const fn = call.function || call;
+          const args = fn.arguments;
+          return {
+            ...call,
+            id: call.id || `kode-call-${iteration}-${index}`,
+            type: call.type || 'function',
+            function: {
+              ...fn,
+              arguments: typeof args === 'string' ? args : JSON.stringify(args || {}),
+            },
+          };
+        });
+        const toolCalls = normalizedNativeToolCalls.length > 0
+          ? convertNativeToolCalls(normalizedNativeToolCalls)
           : parseToolCalls(currentResponse);
 
         // How many ```tool``` blocks the model attempted vs how many actually parsed —
@@ -1265,24 +1333,9 @@ ${newlyDroppedText}`;
             });
             continue; // retry
           }
-          // No tool calls attempted. If the model already did real work earlier THIS
-          // turn (allToolResults.length > 0) but stopped without the explicit "✅ Done"
-          // marker the system prompt asks for, don't just trust that it's actually
-          // finished — a plain summary that quietly stops partway through a multi-step
-          // task looks identical to one that's genuinely done. Nudge it to keep going
-          // (or say so explicitly) instead of silently ending the turn on the model's
-          // word alone. A simple direct answer with NO tool calls at all this turn
-          // (allToolResults.length === 0 — ordinary Q&A, nothing to "finish") is exempt,
-          // so this never forces tool use onto a plain conversational reply.
-          //
-          // This specifically matches "✅ Done" (the exact marker asked for above and in
-          // the system prompt), not just any checkmark. A bare /✅/ test used to also match
-          // an interim progress line like "✅ Fixed the CSS bug, checking the next one" —
-          // the model's own habit of using ✅ to mark a completed SUB-step, not the whole
-          // task — which counted as "done" and let the turn end silently mid-task even
-          // though nothing was actually blocking it. That's the intermittent "stops before
-          // the plan is finished" bug: it only happened on turns where the model's last
-          // message happened to contain a checkmark for some other reason.
+          // Completion is decided from durable state and verification, not from whether
+          // the model remembered an arbitrary "Done" marker. Requiring that marker caused
+          // needless extra model turns and made a good response look incomplete.
           const hasDoneMarker = /✅\s*done\b/i.test(currentResponse);
           // A stall-timeout abort (chatResult.stalled) can also land here: the client
           // gives back whatever partial text it had buffered (or none) with no tool
@@ -1291,15 +1344,29 @@ ${newlyDroppedText}`;
           // (a stall can happen on the very first iteration, before any tool work) —
           // that's the one case the plain "no tool calls" exemption above must NOT apply to.
           const stalled = chatResult.stalled === true;
-          if ((stalled || (allToolResults.length > 0 && !hasDoneMarker)) && consecutiveStalls < MAX_STALL_NUDGES) {
+          const mutatingToolUsed = allToolResults.some((toolResult) =>
+            ['create_file', 'edit_file', 'apply_patch', 'run_command', 'run_tests'].includes(toolResult.tool));
+          const commandExecuted = allToolResults.some((toolResult) =>
+            ['run_command', 'run_tests'].includes(toolResult.tool));
+          const likelyStoppedBeforeChanging = allToolResults.length > 0 &&
+            this._likelyNeedsChanges(userMessage) && !mutatingToolUsed && !hasDoneMarker;
+          const likelyStoppedBeforeAcceptance = this._taskState?.kind === 'command' && !commandExecuted;
+          if ((stalled || likelyStoppedBeforeChanging || likelyStoppedBeforeAcceptance) && consecutiveStalls < MAX_STALL_NUDGES) {
             consecutiveStalls++;
-            console.warn(`[AgentCore] ${stalled ? 'Stream stalled' : 'Stopped without a "✅ Done" marker'} (stall ${consecutiveStalls}/${MAX_STALL_NUDGES}) — nudging to continue or confirm.`);
+            const reason = stalled
+              ? 'Stream stalled'
+              : likelyStoppedBeforeAcceptance
+                ? 'Command request finished without an execution tool'
+                : 'Model stopped after investigation without changing the project';
+            console.warn(`[AgentCore] ${reason} (nudge ${consecutiveStalls}/${MAX_STALL_NUDGES}) — nudging to continue.`);
             conversationHistory.push({ role: 'assistant', content: currentResponse });
             conversationHistory.push({
               role: 'user',
               content: stalled
                 ? `Your last response was cut off by a stalled connection. Please continue from where you left off and keep going with the task.`
-                : `You stopped without saying "✅ Done:" — is the task actually finished? If there's more to do, keep going right now and call the next tool yourself — don't wait for me to ask. If it's genuinely complete, say so explicitly starting with "✅ Done:" and summarize what changed.`,
+                : likelyStoppedBeforeAcceptance
+                  ? `The request requires an actual command/test execution. Use the appropriate execution tool now, then report its real result.`
+                  : `You investigated the task but did not yet make the requested project change. Continue now: implement the fix, add the requested work, or explicitly verify that no change is necessary before finishing.`,
             });
             continue; // retry
           }
@@ -1316,24 +1383,33 @@ ${newlyDroppedText}`;
             break;
           }
 
-          // No tool calls attempted and the model believes the task is finished. Before
-          // trusting that at face value, force a verification pass on whatever this turn
-          // actually wrote to disk — a model saying "✅ Done" is not the same as the
-          // result being correct, and the per-file quickSyntaxCheck note already
-          // appended to each create_file/edit_file/apply_patch result (see tools.js) is
-          // easy to see in the tool log and still walk right past. Only fires when there
-          // is something to verify (hasDoneMarker, i.e. this is an actual completion
-          // claim, not just a plain Q&A reply with nothing to check).
-          if (hasDoneMarker) {
+          if ((likelyStoppedBeforeChanging || likelyStoppedBeforeAcceptance) && consecutiveStalls >= MAX_STALL_NUDGES) {
+            finalResponse = (currentResponse ? currentResponse + '\n\n' : '') +
+              (likelyStoppedBeforeAcceptance
+                ? '⚠️ The requested command was not executed, so this task is not complete.'
+                : '⚠️ The project was investigated, but the requested change was not verified as implemented.');
+            conversationHistory.push({ role: 'assistant', content: finalResponse });
+            if (projectFolder && this._taskState) {
+              this._taskState.status = 'blocked';
+              taskState.saveTaskState(projectFolder, this._taskState);
+            }
+            endedWithReason = true;
+            break;
+          }
+
+          // Any turn that used tools gets the same verification gate, even if the model
+          // forgot the marker. This catches "I updated the file" claims while keeping
+          // ordinary no-tool Q&A fast.
+          if (allToolResults.length > 0 || hasDoneMarker) {
             const verifyIssue = await this._verifyDoneClaim(allToolResults, projectFolder);
             if (verifyIssue) {
               if (consecutiveVerifyFails < MAX_VERIFY_NUDGES) {
                 consecutiveVerifyFails++;
-                console.warn(`[AgentCore] Verification found a problem after "✅ Done" (attempt ${consecutiveVerifyFails}/${MAX_VERIFY_NUDGES}) — nudging to fix it.`);
+                console.warn(`[AgentCore] Verification found a problem (attempt ${consecutiveVerifyFails}/${MAX_VERIFY_NUDGES}) — nudging to fix it.`);
                 conversationHistory.push({ role: 'assistant', content: currentResponse });
                 conversationHistory.push({
                   role: 'user',
-                  content: `Hold on — before that's actually done:\n${verifyIssue}\n\nFix it, then confirm again.`,
+                  content: `Before finishing, resolve this verification issue:\n${verifyIssue}\n\nFix it and continue.`,
                 });
                 continue; // retry
               }
@@ -1350,6 +1426,11 @@ ${newlyDroppedText}`;
           // No tool calls attempted — we're done
           finalResponse = currentResponse;
           conversationHistory.push({ role: 'assistant', content: currentResponse });
+          if (projectFolder && this._taskState) {
+            this._taskState.status = 'completed';
+            this._taskState.phase = 'completed';
+            taskState.clearTaskState(projectFolder);
+          }
           endedWithReason = true;
           break;
         }
@@ -1359,8 +1440,17 @@ ${newlyDroppedText}`;
         consecutiveEmpties = 0;
         consecutiveVerifyFails = 0;
 
-        // There are tool calls — add assistant message to history
-        conversationHistory.push({ role: 'assistant', content: currentResponse });
+        // Preserve the native assistant tool-call message. OpenAI-compatible and
+        // Anthropic providers use this to validate and correctly continue the turn.
+        if (nativeToolCalls.length > 0) {
+          conversationHistory.push({
+            role: 'assistant',
+            content: currentResponse || '',
+            tool_calls: normalizedNativeToolCalls,
+          });
+        } else {
+          conversationHistory.push({ role: 'assistant', content: currentResponse });
+        }
 
         // Execute each tool call
         const toolResultParts = [];
@@ -1388,6 +1478,15 @@ ${newlyDroppedText}`;
           allToolResults.push(toolExecution);
           toolResultParts.push(`[Tool Result: ${toolExecution.tool}]\n${toolExecution.result}`);
         }
+        if (this._taskState) {
+          const names = batchResults.map((result) => result.tool);
+          this._taskState.phase = names.some((name) => ['create_file', 'edit_file', 'apply_patch'].includes(name))
+            ? 'implementing'
+            : names.some((name) => ['run_tests', 'run_command'].includes(name))
+              ? 'verifying'
+              : 'exploring';
+          if (projectFolder) taskState.saveTaskState(projectFolder, this._taskState);
+        }
 
         // If some (but not all) ```tool``` blocks in this response failed to parse,
         // the successfully-parsed ones above already ran — but silently dropping the
@@ -1399,13 +1498,27 @@ ${newlyDroppedText}`;
           );
         }
 
-        // Add tool results as a "user" message (simulating tool feedback to the LLM)
-        // Some models expect tool results this way; we use a clear format
-        const toolResultsMessage = toolResultParts.join('\n\n---\n\n');
-        conversationHistory.push({
-          role: 'user',
-          content: `Tool results:\n${toolResultsMessage}\n\nIn one short line, say what that step accomplished, then immediately continue to the next step — don't stop to ask if you should keep going. Only stop if you're genuinely blocked and need something from the user. If the entire task is now fully done, say so explicitly: start your final line with "✅ Done:" and summarize what changed.`,
-        });
+        // Native calls must be answered with provider-native tool messages. Treating
+        // them as a fake user paragraph breaks the tool-call protocol and degrades
+        // quality after the first tool round. Markdown-convention models keep the
+        // readable synthetic user message for compatibility.
+        if (nativeToolCalls.length > 0) {
+          for (let resultIndex = 0; resultIndex < batchResults.length; resultIndex++) {
+            const result = batchResults[resultIndex];
+            conversationHistory.push({
+              role: 'tool',
+              tool_call_id: result.callId || `kode-call-${iteration}-${resultIndex}`,
+              name: result.tool,
+              content: result.result,
+            });
+          }
+        } else {
+          const toolResultsMessage = toolResultParts.join('\n\n---\n\n');
+          conversationHistory.push({
+            role: 'user',
+            content: `Tool results:\n${toolResultsMessage}\n\nContinue with the next step. Only stop if the task is fully complete or you are genuinely blocked and need something from the user.`,
+          });
+        }
 
         // Continue the loop — the LLM will see the tool results and may generate more tool calls
         finalResponse = currentResponse;

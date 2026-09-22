@@ -196,6 +196,7 @@ contextBridge.exposeInMainWorld('kode', {
    * @returns {Promise<{success: boolean, type?: 'file'|'folder', content?: string, error?: string}>}
    */
   getAttachmentContent: (attachedPath) => ipcRenderer.invoke('get-attachment-content', attachedPath),
+  getMarkdownPreview: (markdownPath) => ipcRenderer.invoke('get-markdown-preview', markdownPath),
 
   /**
    * Save an image pasted or dropped into the chat box. Clipboard images exist only as

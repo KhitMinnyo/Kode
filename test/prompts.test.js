@@ -3,7 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { getSystemPrompt, getAvailableToolNames, supportsNativeToolCalling, looksSecurityRelated } = require('../src/agent/prompts');
+const { getSystemPrompt, getAvailableToolNames, supportsNativeToolCalling, looksSecurityRelated, looksLikeWritingRequest } = require('../src/agent/prompts');
 
 test('getAvailableToolNames includes every implemented tool', () => {
   const names = getAvailableToolNames();
@@ -68,6 +68,13 @@ test('looksSecurityRelated flags obvious pentest/security phrasing and ignores p
   for (const msg of ['write a python function to sort a list', 'fix this bug in app.js', 'add a login form', '']) {
     assert.equal(looksSecurityRelated(msg), false, `"${msg}" should NOT be flagged as security-related`);
   }
+});
+
+test('writing requests receive a prose-quality prompt without misclassifying ordinary coding work', () => {
+  assert.equal(looksLikeWritingRequest('write an essay about climate policy'), true);
+  assert.equal(looksLikeWritingRequest('write a function that parses JSON'), false);
+  assert.match(getSystemPrompt(null, 'gpt-5.6-luna', 'write an article in Burmese'), /Writing Mode/);
+  assert.doesNotMatch(getSystemPrompt(null, 'gpt-5.6-luna', 'write a function that parses JSON'), /Writing Mode/);
 });
 
 test('getSystemPrompt omits the full pentest playbook for plain coding requests on standard models', () => {

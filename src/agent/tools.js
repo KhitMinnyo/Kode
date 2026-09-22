@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execSync, execFileSync, spawn } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 const memory = require('./memory');
 const plan = require('./plan');
 const processManager = require('./processManager');
@@ -10,7 +10,6 @@ const { parseUnifiedDiff, applyHunksToContent, PatchError } = require('./patch')
 const embeddings = require('./embeddings');
 
 const MAX_FILE_READ_SIZE = 50 * 1024; // 50KB
-const COMMAND_TIMEOUT = 30000; // 30 seconds
 const EXTERNAL_FETCH_TIMEOUT = 15000; // 15 seconds — for calls to external APIs (Firecrawl, Brave Search)
 
 // zsh is the default shell on modern macOS, but Kode also ships a Linux build

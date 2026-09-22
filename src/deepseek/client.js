@@ -11,7 +11,6 @@ const {
   armFirstOutputDeadline,
 } = require('../shared/streamGuards');
 
-const DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 const DEFAULT_TIMEOUT = 30000;
 
 // Hardcoded model catalog — DeepSeek has a fixed set of models.

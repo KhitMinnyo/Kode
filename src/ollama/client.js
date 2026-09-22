@@ -355,7 +355,11 @@ class OllamaClient {
       options: {
         num_ctx: numCtx,
         temperature: opts.temperature !== undefined ? opts.temperature : 0.4,
-        num_predict: Math.min(2048, Math.floor(numCtx * 0.4)),
+        // A 2048-token hard cap truncates long tool arguments (complete files,
+        // patches, and documents) before the agent can finish. The agent supplies a
+        // per-turn cap based on the actual context budget; keep a sensible fallback
+        // for callers that use the client directly.
+        num_predict: opts.maxTokens || Math.max(2048, Math.floor(numCtx * 0.6)),
       },
     };
 

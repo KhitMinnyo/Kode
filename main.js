@@ -203,6 +203,7 @@ function getDefaultSettings() {
     lmstudioContextSize: LMSTUDIO_DEFAULT_CONTEXT_SIZE, // Assumed context window for LM Studio — set to match the loaded model
     maxContextTokens: 16384,     // Context-size ceiling; raise for large-context models (e.g. Qwen3.6)
     maxToolIterations: 50,       // Per-turn safety cap on model↔tool round-trips (see AgentCore). Raise for long multi-file tasks; a cloud model can run much longer than a local one.
+    reasoningEffort: 'medium',   // OpenAI reasoning-model effort: low | medium | high; ignored by providers that do not support it.
     confirmRiskyCommands: true,  // Pause run_command's "risky but allowed" tier (curl|sh, base64->sh, etc.) for user approval — see src/agent/tools.js
     firecrawlApiKey: '',         // Firecrawl API key, used by the firecrawl_scrape tool (falls back to FIRECRAWL_API_KEY env var if unset)
     braveSearchApiKey: '',       // Brave Search API key, used by the web_search tool (falls back to BRAVE_SEARCH_API_KEY env var if unset)
@@ -406,6 +407,7 @@ function getOrCreateTabAgent(tabId) {
   if (!entry) {
     const client = createClientForActiveProvider();
     const agentCore = new AgentCore(client, appSettings.maxContextTokens, appSettings.provider, appSettings.maxToolIterations);
+    agentCore.setGenerationOptions(appSettings);
     agentCore.setToolApiKeys(appSettings);
     entry = { agentCore, client, provider: appSettings.provider };
     tabAgents.set(tabId, entry);
@@ -435,10 +437,12 @@ function reconfigureTabAgentsOnSettingsChange() {
       applySettingsToClient(entry.client, entry.provider);
       entry.agentCore.setMaxContextCap(appSettings.maxContextTokens);
       entry.agentCore.setMaxToolIterations(appSettings.maxToolIterations);
+      entry.agentCore.setGenerationOptions(appSettings);
       entry.agentCore.setToolApiKeys(appSettings);
     } else {
       const client = createClientForActiveProvider();
       const agentCore = new AgentCore(client, appSettings.maxContextTokens, appSettings.provider, appSettings.maxToolIterations);
+      agentCore.setGenerationOptions(appSettings);
       agentCore.setToolApiKeys(appSettings);
       tabAgents.set(tabId, { agentCore, client, provider: appSettings.provider });
     }
@@ -1241,6 +1245,25 @@ ${err.message}`;
 
       const content = await agentTools.read_file({ path: attachedPath }, null);
       return { success: true, type: 'file', content: `[Attached file: ${attachedPath}]\n${content}` };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  /** Reads a Markdown document for the renderer's local, sanitized preview pane. */
+  ipcMain.handle('get-markdown-preview', async (event, markdownPath) => {
+    if (!markdownPath || !/\.(md|markdown|mdown|mkdn)$/i.test(markdownPath)) {
+      return { success: false, error: 'Only Markdown files can be previewed.' };
+    }
+    try {
+      if (!fs.existsSync(markdownPath)) return { success: false, error: 'Markdown file not found.' };
+      const stats = fs.statSync(markdownPath);
+      if (!stats.isFile()) return { success: false, error: 'Selected Markdown path is not a file.' };
+      const MAX_MARKDOWN_PREVIEW_BYTES = 2 * 1024 * 1024;
+      if (stats.size > MAX_MARKDOWN_PREVIEW_BYTES) {
+        return { success: false, error: `Markdown file is too large to preview (limit: ${MAX_MARKDOWN_PREVIEW_BYTES / 1024 / 1024}MB).` };
+      }
+      return { success: true, path: markdownPath, content: fs.readFileSync(markdownPath, 'utf-8') };
     } catch (err) {
       return { success: false, error: err.message };
     }

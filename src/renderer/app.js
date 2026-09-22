@@ -994,8 +994,11 @@
 
   const preview = {
     open: false,
+    mode: 'web',         // 'web' | 'markdown'
     webview: null,      // the <webview> element, created lazily on first open
     url: '',
+    markdownPath: '',
+    markdownName: '',
     errors: [],         // { kind, text, source, line } captured from the page
     injected: false,    // whether the page-error hook has been installed this load
   };
@@ -1011,7 +1014,10 @@
     const on = (id, ev, fn) => { const el = document.getElementById(id); if (el) el.addEventListener(ev, fn); };
 
     on('preview-close', 'click', closePreview);
-    on('preview-reload', 'click', () => { if (preview.webview) { clearPreviewErrors(); preview.webview.reload(); } });
+    on('preview-reload', 'click', () => {
+      if (preview.mode === 'markdown') reloadMarkdownPreview();
+      else if (preview.webview) { clearPreviewErrors(); preview.webview.reload(); }
+    });
     on('preview-back', 'click', () => { if (preview.webview && preview.webview.canGoBack()) preview.webview.goBack(); });
     on('preview-forward', 'click', () => { if (preview.webview && preview.webview.canGoForward()) preview.webview.goForward(); });
     on('preview-open-external', 'click', () => { if (preview.url) window.kode.openExternal(preview.url); });
@@ -1034,7 +1040,11 @@
   }
 
   async function openPreview() {
+    const wasMarkdown = preview.mode === 'markdown';
     preview.open = true;
+    preview.mode = 'web';
+    if (wasMarkdown) preview.url = '';
+    updatePreviewModeUI();
     const panel = previewPanel();
     const resizer = previewResizer();
     if (panel) panel.hidden = false;
@@ -1063,6 +1073,66 @@
     // The <webview> is left in place (not destroyed) so its page state and history
     // survive a hide/show — a hidden panel costs nothing since the element isn't
     // rendered. It's torn down only if the whole stage is reset.
+  }
+
+  /** Opens a project Markdown file in the local sanitized renderer, like a document preview. */
+  async function openMarkdownPreview(filePath, fileName) {
+    preview.open = true;
+    preview.mode = 'markdown';
+    preview.markdownPath = filePath;
+    preview.markdownName = fileName || filePath.split(/[\\/]/).pop() || 'Markdown';
+    const panel = previewPanel();
+    const resizer = previewResizer();
+    if (panel) { panel.hidden = false; panel.classList.add('markdown-mode'); }
+    if (resizer) resizer.hidden = false;
+    const toggle = document.getElementById('preview-toggle-btn');
+    if (toggle) toggle.classList.add('active');
+    updatePreviewModeUI();
+    await reloadMarkdownPreview();
+  }
+
+  async function reloadMarkdownPreview() {
+    if (preview.mode !== 'markdown' || !preview.markdownPath) return;
+    const stage = previewStage();
+    if (!stage) return;
+    const old = stage.querySelector('.markdown-preview-content');
+    if (old) old.remove();
+
+    const content = document.createElement('div');
+    content.className = 'markdown-preview-content';
+    const title = document.createElement('div');
+    title.className = 'markdown-preview-title';
+    title.textContent = preview.markdownName;
+    content.appendChild(title);
+
+    const body = document.createElement('div');
+    body.className = 'markdown-preview-body';
+    body.textContent = 'Loading Markdown…';
+    content.appendChild(body);
+    stage.appendChild(content);
+    const empty = document.getElementById('preview-empty');
+    if (empty) empty.hidden = true;
+    if (preview.webview) preview.webview.style.display = 'none';
+
+    try {
+      const result = await window.kode.getMarkdownPreview(preview.markdownPath);
+      if (!result.success) {
+        body.textContent = `⚠️ ${result.error || 'Could not load Markdown.'}`;
+        return;
+      }
+      body.innerHTML = '';
+      body.appendChild(renderMarkdown(result.content || ''));
+    } catch (err) {
+      body.textContent = `⚠️ Markdown preview failed: ${err.message || err}`;
+    }
+  }
+
+  function updatePreviewModeUI() {
+    const panel = previewPanel();
+    if (!panel) return;
+    panel.classList.toggle('markdown-mode', preview.mode === 'markdown');
+    const url = document.getElementById('preview-url');
+    if (url && preview.mode === 'markdown') url.value = preview.markdownName;
   }
 
   /** Creates the <webview> lazily and wires its events. Safe to call repeatedly. */
@@ -1144,6 +1214,11 @@
   }
 
   function navigatePreview(url) {
+    preview.mode = 'web';
+    preview.markdownPath = '';
+    const markdown = previewStage()?.querySelector('.markdown-preview-content');
+    if (markdown) markdown.remove();
+    updatePreviewModeUI();
     const wv = ensureWebview();
     if (!wv) return;
     clearPreviewErrors();
@@ -1690,6 +1765,23 @@
         }
       }
 
+      // Keep a compact record of the tool work in the durable tab history. The live
+      // backend loop has the full tool messages, but a safety-limit auto-continue is a
+      // fresh IPC request; without this bridge it only receives the last prose line and
+      // forgets what it just read/changed. Cap each result so a large test/scan output
+      // cannot consume the next turn's entire context.
+      if (toolResults && toolResults.length) {
+        const toolSummary = toolResults.map((tr) => {
+          const result = String(tr.result || '');
+          const compact = result.length > 2500 ? `${result.slice(0, 2500)}\n... (tool result trimmed in chat history)` : result;
+          return `[Tool Result: ${tr.tool}]\n${compact}`;
+        }).join('\n\n---\n\n');
+        tab.conversationHistory.push({
+          role: 'user',
+          content: `[Previous turn tool results — continue from this state]\n${toolSummary}`,
+        });
+      }
+
       // Add to conversation history
       tab.conversationHistory.push({ role: 'assistant', content: finalContent });
 
@@ -2042,6 +2134,10 @@
   }
 
   function handleFileClick(filePath, fileName) {
+    if (/\.(md|markdown|mdown|mkdn)$/i.test(fileName || filePath)) {
+      openMarkdownPreview(filePath, fileName);
+      return;
+    }
     const input = messageInput();
     if (input) {
       input.value = `Read the file: ${filePath}`;
@@ -2998,6 +3094,7 @@
       const lmstudioContextInput = document.getElementById('lmstudio-context-size');
       const contextInput = document.getElementById('max-context-tokens');
       const toolIterationsInput = document.getElementById('max-tool-iterations');
+      const reasoningEffortInput = document.getElementById('reasoning-effort');
       const confirmRiskyInput = document.getElementById('confirm-risky-commands');
       const firecrawlKeyInput = document.getElementById('firecrawl-key');
       const braveKeyInput = document.getElementById('brave-key');
@@ -3015,6 +3112,7 @@
       if (lmstudioContextInput) lmstudioContextInput.value = String(settings.lmstudioContextSize || 8192);
       if (contextInput) contextInput.value = String(settings.maxContextTokens || 16384);
       if (toolIterationsInput) toolIterationsInput.value = String(settings.maxToolIterations || 25);
+      if (reasoningEffortInput) reasoningEffortInput.value = settings.reasoningEffort || 'medium';
       if (confirmRiskyInput) confirmRiskyInput.checked = settings.confirmRiskyCommands !== false;
       if (firecrawlKeyInput) firecrawlKeyInput.value = settings.firecrawlApiKey || '';
       if (braveKeyInput) braveKeyInput.value = settings.braveSearchApiKey || '';
@@ -3274,6 +3372,7 @@
     const lmstudioContextSize = parseInt(document.getElementById('lmstudio-context-size')?.value, 10) || 8192;
     const maxContextTokens = parseInt(document.getElementById('max-context-tokens')?.value, 10) || 16384;
     const maxToolIterations = parseInt(document.getElementById('max-tool-iterations')?.value, 10) || 25;
+    const reasoningEffort = document.getElementById('reasoning-effort')?.value || 'medium';
     const confirmRiskyCommands = document.getElementById('confirm-risky-commands')?.checked !== false;
     const firecrawlApiKey = document.getElementById('firecrawl-key')?.value?.trim() || '';
     const braveSearchApiKey = document.getElementById('brave-key')?.value?.trim() || '';
@@ -3294,6 +3393,7 @@
         lmstudioContextSize,
         maxContextTokens,
         maxToolIterations,
+        reasoningEffort,
         confirmRiskyCommands,
         firecrawlApiKey,
         braveSearchApiKey,

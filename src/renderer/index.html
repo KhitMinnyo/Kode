@@ -199,19 +199,19 @@
          project's index.html. See setupPreview() in app.js. -->
     <section class="preview-panel" id="preview-panel" hidden>
       <div class="preview-toolbar">
-        <button class="preview-btn" id="preview-back" title="Back" disabled>‹</button>
-        <button class="preview-btn" id="preview-forward" title="Forward" disabled>›</button>
+        <button class="preview-btn web-only" id="preview-back" title="Back" disabled>‹</button>
+        <button class="preview-btn web-only" id="preview-forward" title="Forward" disabled>›</button>
         <button class="preview-btn" id="preview-reload" title="Reload">⟳</button>
-        <input type="text" class="preview-url" id="preview-url" placeholder="http://localhost:…" spellcheck="false" autocomplete="off" />
-        <select class="preview-viewport" id="preview-viewport" title="Viewport size">
+        <input type="text" class="preview-url web-only" id="preview-url" placeholder="http://localhost:…" spellcheck="false" autocomplete="off" />
+        <select class="preview-viewport web-only" id="preview-viewport" title="Viewport size">
           <option value="responsive">Responsive</option>
           <option value="1280x800">Desktop 1280×800</option>
           <option value="768x1024">Tablet 768×1024</option>
           <option value="390x844">Phone 390×844</option>
         </select>
-        <button class="preview-btn" id="preview-console" title="Send console errors to the chat">🐞 <span id="preview-error-count">0</span></button>
-        <button class="preview-btn" id="preview-screenshot" title="Screenshot the preview and attach it to your next message">📷</button>
-        <button class="preview-btn" id="preview-open-external" title="Open in your browser">↗</button>
+        <button class="preview-btn web-only" id="preview-console" title="Send console errors to the chat">🐞 <span id="preview-error-count">0</span></button>
+        <button class="preview-btn web-only" id="preview-screenshot" title="Screenshot the preview and attach it to your next message">📷</button>
+        <button class="preview-btn web-only" id="preview-open-external" title="Open in your browser">↗</button>
         <button class="preview-btn" id="preview-close" title="Close preview">✕</button>
       </div>
       <div class="preview-stage" id="preview-stage">
@@ -338,6 +338,15 @@
               <option value="500">500 — maximum</option>
             </select>
             <span class="field-hint">💡 How many model↔tool round-trips Kode will run before cutting a turn off with a "stopped after N steps" notice. Raise this if long multi-file tasks (or cloud models with longer useful runs) keep getting interrupted before finishing. Applies to all providers.</span>
+          </div>
+          <div class="settings-field">
+            <label for="reasoning-effort">Reasoning Effort</label>
+            <select id="reasoning-effort">
+              <option value="low">Low — faster and cheaper</option>
+              <option value="medium" selected>Medium — balanced</option>
+              <option value="high">High — harder tasks, slower</option>
+            </select>
+            <span class="field-hint">💡 Used by supported OpenAI reasoning models such as GPT-5/6 families. Other providers ignore this setting.</span>
           </div>
         </div>
 

@@ -244,6 +244,34 @@ class AnthropicClient {
         // A system prompt is always plain text; textOf() keeps this safe if that ever
         // stops being true rather than stringifying an array into "[object Object]".
         systemParts.push(textOf(msg.content));
+      } else if (msg.role === 'assistant' && Array.isArray(msg.tool_calls)) {
+        const content = [];
+        if (textOf(msg.content)) content.push({ type: 'text', text: textOf(msg.content) });
+        for (const call of msg.tool_calls) {
+          const fn = call.function || call;
+          let input = fn.arguments || {};
+          if (typeof input === 'string') {
+            try { input = JSON.parse(input); } catch { input = {}; }
+          }
+          content.push({
+            type: 'tool_use',
+            id: call.id || `kode-tool-${conversation.length}`,
+            name: fn.name,
+            input,
+          });
+        }
+        conversation.push({ role: 'assistant', content });
+      } else if (msg.role === 'tool') {
+        // Anthropic represents tool output as a user message containing a
+        // tool_result block, rather than an OpenAI-style role:'tool' message.
+        conversation.push({
+          role: 'user',
+          content: [{
+            type: 'tool_result',
+            tool_use_id: msg.tool_call_id,
+            content: String(msg.content ?? ''),
+          }],
+        });
       } else {
         conversation.push({
           role: msg.role === 'assistant' ? 'assistant' : 'user',
@@ -415,7 +443,7 @@ class AnthropicClient {
       this._abortReason = null;
     }
 
-    const toolCalls = Object.values(toolBlocks).map((b) => ({ function: { name: b.name, arguments: b.jsonBuffer } }));
+    const toolCalls = Object.values(toolBlocks).map((b) => ({ id: b.id, function: { name: b.name, arguments: b.jsonBuffer } }));
     return { text: fullResponse, toolCalls, stalled: false };
   }
 

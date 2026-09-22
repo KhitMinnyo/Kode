@@ -1,6 +1,7 @@
 'use strict';
 
 const plan = require('./plan');
+const taskState = require('./taskState');
 
 // Keywords/patterns that indicate a task is security/pentest-flavored. Kept in one
 // place so core.js's scan-output detector and this module can both reason about
@@ -28,6 +29,23 @@ function looksSecurityRelated(message = '') {
   return SECURITY_KEYWORDS.some((kw) => lower.includes(kw));
 }
 
+/** Keep prose/document generation distinct from coding instructions. */
+function looksLikeWritingRequest(message = '') {
+  if (!message) return false;
+  const lower = message.toLowerCase();
+  const proseSignals = [
+    'essay', 'article', 'blog', 'story', 'report', 'proposal', 'letter', 'email',
+    'documentation', 'readme', 'copywriting', 'proofread', 'rewrite', 'translate',
+    'summarize', 'outline', 'draft', 'compose', 'creative writing',
+    'စာရေး', 'ဆောင်းပါး', 'အစီရင်ခံစာ', 'ဘာသာပြန်', 'ပြန်ရေး', 'အကျဉ်းချုပ်',
+  ];
+  if (!proseSignals.some((signal) => lower.includes(signal))) return false;
+
+  // "write a function/file/script" is implementation work, not prose generation.
+  const codeSignals = /\b(function|class|component|module|script|program|code|file|api|bug|test|implement)\b/i;
+  return !codeSignals.test(lower) || /\b(essay|article|report|documentation|readme|translate|rewrite|proofread)\b/i.test(lower);
+}
+
 /**
  * Returns a system prompt adapted for the selected model and the task at hand.
  * Uncensored models (DeepHat, Dolphin) get full red team capabilities.
@@ -38,7 +56,7 @@ function looksSecurityRelated(message = '') {
  * context budget that would otherwise be spent on unused recon/exploit playbooks
  * on every single message.
  */
-function getSystemPrompt(projectFolder, modelName = '', userMessage = '') {
+function getSystemPrompt(projectFolder, modelName = '', userMessage = '', activeTaskState = null) {
   const cwd = projectFolder
     ? `Current project: ${projectFolder}\nUse relative paths from this folder.`
     : 'No project folder selected. Use absolute paths.';
@@ -76,6 +94,14 @@ write_plan again as you complete each one. If the current request is unrelated t
 plan, ignore it and start fresh; write_plan will replace it.`
     : '';
 
+  const taskStateSection = activeTaskState ? `
+
+## Acceptance Contract
+Treat this as an execution contract, not a suggestion. Do not claim completion until the
+acceptance criteria are satisfied or you clearly report the blocker:
+${taskState.formatTaskState(activeTaskState)}
+` : '';
+
   const pentesterMindsetSection = includeSecuritySection ? `
 ## Pentester Mindset
 You are a penetration tester. When given a target (IP, domain, URL):
@@ -94,6 +120,18 @@ output (nmap, nikto, sqlmap, etc.), switch into recon/exploit mode: whois/dig/nm
 recon, match versions to CVEs, rate findings by severity, and give exact next commands.
 `;
 
+  const writingSection = looksLikeWritingRequest(userMessage) ? `
+## Writing Mode
+The user is asking for a prose or document deliverable. Produce the deliverable itself,
+not a plan about writing it and not a progress update. Infer the audience, purpose,
+language, tone, and length from the request; make a reasonable default when one is not
+specified. Use clear structure, concrete detail, natural transitions, and examples where
+they improve clarity. Preserve the user's language unless translation is requested.
+Silently edit for correctness, consistency, repetition, unsupported claims, and formatting
+before responding. Complete the requested draft rather than stopping at an outline or a
+short sample. Do not prefix the deliverable with tool-status chatter.
+` : '';
+
   return `You are **Kode**, a versatile AI agent for coding and cybersecurity.
 You think and act like an experienced penetration tester AND a senior developer.
 
@@ -101,6 +139,7 @@ You think and act like an experienced penetration tester AND a senior developer.
 - macOS/Linux, zsh/bash shell
 - ${cwd}
 ${activePlanSection}
+${taskStateSection}
 
 ## CRITICAL: Direct Action vs Planning
 
@@ -217,13 +256,15 @@ This turns one-off research into a growing local knowledge base for the project 
 
 ${pentesterMindsetSection}
 ${securitySection}
+${writingSection}
 
 ## Rules
 - Use tools for all file operations
 - Write complete working code
 - One tool per block
-- Be concise — a short one-line status beats a long explanation, but never go silent:
-  always say what you're doing, and always say "✅ Done" when the task is finished
+- Be concise during tool work, but make the final answer complete for the user's request.
+  End with a short summary only after the actual work and verification are finished; a
+  special completion marker is not required.
 - After running a server, report the URL
 - When asked to run something, RUN IT. Don't rewrite it.`;
 
@@ -623,4 +664,4 @@ function supportsNativeToolCalling(modelName = '', provider = 'ollama') {
   return nativeFamilies.some(f => model.includes(f));
 }
 
-module.exports = { getSystemPrompt, getAvailableToolNames, supportsNativeToolCalling, looksSecurityRelated };
+module.exports = { getSystemPrompt, getAvailableToolNames, supportsNativeToolCalling, looksSecurityRelated, looksLikeWritingRequest };

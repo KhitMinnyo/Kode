@@ -256,8 +256,18 @@ class OpenAIClient {
       model,
       messages: this._normalizeMessages(messages),
       stream: true,
-      temperature: opts.temperature !== undefined ? opts.temperature : 0.7,
     };
+    const reasoningModel = /^(o[1-9]|gpt-(5|6))/i.test(model) || /reasoning/i.test(model);
+    // New reasoning models reject the legacy temperature/max_tokens fields. Use the
+    // modern completion limit for them while retaining compatibility with older GPT
+    // chat models. This also prevents provider defaults from cutting off tool JSON.
+    if (!reasoningModel) {
+      requestBody.temperature = opts.temperature !== undefined ? opts.temperature : 0.3;
+      requestBody.max_tokens = opts.maxTokens || 32768;
+    } else {
+      requestBody.max_completion_tokens = opts.maxTokens || 32768;
+      if (opts.reasoningEffort) requestBody.reasoning_effort = opts.reasoningEffort;
+    }
     if (Array.isArray(opts.tools) && opts.tools.length > 0) {
       requestBody.tools = opts.tools;
     }

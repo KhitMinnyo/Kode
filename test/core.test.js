@@ -125,6 +125,25 @@ test('AgentCore.setMaxContextCap updates the cap and ignores invalid input', asy
   assert.equal(core.maxContextCap, 32768, 'non-positive input should be ignored');
 });
 
+test('AgentCore detects project-native verification commands instead of assuming npm', () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const core = new AgentCore({ getContextSize: async () => 8192 });
+
+  const pythonDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kode-python-check-'));
+  fs.writeFileSync(path.join(pythonDir, 'pyproject.toml'), '[tool.pytest.ini_options]\n');
+  assert.equal(core._getVerificationCommand(pythonDir), 'python3 -m pytest');
+
+  const rustDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kode-rust-check-'));
+  fs.writeFileSync(path.join(rustDir, 'Cargo.toml'), '[package]\nname = "demo"\n');
+  assert.equal(core._getVerificationCommand(rustDir), 'cargo test');
+
+  const goDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kode-go-check-'));
+  fs.writeFileSync(path.join(goDir, 'go.mod'), 'module example.test\n');
+  assert.equal(core._getVerificationCommand(goDir), 'go test ./...');
+});
+
 test('AgentCore._getContextSize caches per model and respects the configured cap', async () => {
   let calls = 0;
   const mockClient = { getContextSize: async () => { calls++; return 999999; } };
@@ -218,6 +237,43 @@ test('processMessage threads onConfirmCommand through to a risky run_command too
   const runCommandResult = result.toolResults.find(t => t.tool === 'run_command');
   assert.ok(runCommandResult, 'expected a run_command tool result');
   assert.match(runCommandResult.result, /🚫 Blocked.*user declined/i);
+});
+
+test('processMessage preserves native tool-call protocol messages for the next model step', async () => {
+  const requests = [];
+  let chatCallCount = 0;
+  const mockClient = {
+    getContextSize: async () => 8192,
+    abort() {},
+    chat: async (model, messages) => {
+      requests.push(messages);
+      chatCallCount++;
+      if (chatCallCount === 1) {
+        return {
+          text: '',
+          toolCalls: [{
+            id: 'call_read_1',
+            type: 'function',
+            function: { name: 'read_file', arguments: '{"path":"package.json"}' },
+          }],
+        };
+      }
+      return { text: 'The file was inspected.', toolCalls: [] };
+    },
+  };
+
+  const core = new AgentCore(mockClient, 8192, 'openai');
+  await core.processMessage('inspect package.json', 'gpt-test', [], () => {}, () => {});
+
+  assert.equal(requests.length, 2);
+  const followUp = requests[1];
+  const assistantCall = followUp.find((message) => message.role === 'assistant' && message.tool_calls);
+  const toolResult = followUp.find((message) => message.role === 'tool');
+  assert.ok(assistantCall, 'follow-up must include the assistant tool-call message');
+  assert.equal(assistantCall.tool_calls[0].id, 'call_read_1');
+  assert.ok(toolResult, 'follow-up must include a provider-native tool result');
+  assert.equal(toolResult.tool_call_id, 'call_read_1');
+  assert.equal(toolResult.name, 'read_file');
 });
 
 test('processMessage never consults onConfirmCommand when it is not provided (default/safety-off shape)', async () => {

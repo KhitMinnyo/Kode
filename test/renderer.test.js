@@ -147,6 +147,11 @@ async function bootApp() {
       return { success: true, type: "file", content: `[Attached file: ${attachedPath}]
 contents` };
     },
+    getMarkdownPreview: async (markdownPath) => ({
+      success: true,
+      path: markdownPath,
+      content: '# Preview\n\nMarkdown content',
+    }),
     stopGeneration: async (tabId) => {
       captured.stopGenerationCalls.push(tabId);
       return { success: true };
