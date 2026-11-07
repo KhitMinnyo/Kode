@@ -30,11 +30,10 @@ jobs:
         run: npm test && npm run lint
 
       - name: Build .exe (${{ matrix.arch }})
-        run: npx electron-builder --win nsis --${{ matrix.arch }}
+        run: npx electron-builder --win nsis --${{ matrix.arch }} --publish never
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD || '' }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

@@ -894,7 +894,7 @@ test('nested-project checkpoints and restores do not touch sibling staged change
   fs.writeFileSync(path.join(sibling, 'other.js'), 'different user work\n');
   const result = await tools.git_revert({}, project);
   assert.match(result, /Restored tracked files in the selected project/);
-  assert.equal(fs.readFileSync(path.join(project, 'app.js'), 'utf-8'), 'checkpoint state\n');
+  assert.equal(fs.readFileSync(path.join(project, 'app.js'), 'utf-8').replace(/\r\n/g, '\n'), 'checkpoint state\n');
   assert.equal(fs.readFileSync(path.join(sibling, 'other.js'), 'utf-8'), 'different user work\n');
   assert.equal(execFileSync('git', ['diff', '--cached', '--binary'], { cwd: repo, encoding: 'utf-8' }), stagedBefore);
 });

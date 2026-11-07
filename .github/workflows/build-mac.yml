@@ -27,14 +27,18 @@ jobs:
         run: npm test && npm run lint
 
       - name: Build .dmg (universal)
-        run: npx electron-builder --mac dmg
+        run: |
+          if [ -n "$CSC_LINK" ]; then
+            npx electron-builder --mac dmg --publish never
+          else
+            env -u CSC_LINK -u CSC_KEY_PASSWORD -u APPLE_ID -u APPLE_APP_SPECIFIC_PASSWORD -u APPLE_TEAM_ID npx electron-builder --mac dmg --publish never
+          fi
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.MACOS_CSC_KEY_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CSC_LINK: ${{ secrets.MACOS_CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ secrets.MACOS_CSC_KEY_PASSWORD || '' }}
+          APPLE_ID: ${{ secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID || '' }}
           # Avoid runner identity discovery; an explicitly configured CSC_LINK is still used.
           CSC_IDENTITY_AUTO_DISCOVERY: false
 
