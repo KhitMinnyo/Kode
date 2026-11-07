@@ -21,6 +21,24 @@ test('loadMemory returns empty (not a throw) for a missing/null project folder',
   assert.deepEqual(memory.loadMemory(null), { entries: [] });
 });
 
+test('loadMemory imports legacy project memory only from a regular non-symlink file', (t) => {
+  const dir = makeTempDir();
+  fs.mkdirSync(path.join(dir, '.kode'));
+  fs.writeFileSync(path.join(dir, '.kode', 'memory.json'), JSON.stringify({ entries: [{ key: 'legacy', value: 'old note' }] }));
+  assert.equal(memory.loadMemory(dir).entries[0].value, 'old note');
+
+  const linkedProject = makeTempDir();
+  const externalDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kode-memory-external-'));
+  fs.writeFileSync(path.join(externalDir, 'memory.json'), JSON.stringify({ entries: [{ key: 'outside', value: 'must not load' }] }));
+  try {
+    fs.symlinkSync(externalDir, path.join(linkedProject, '.kode'));
+  } catch (err) {
+    if (process.platform === 'win32') return t.skip(`Windows symlink privilege unavailable: ${err.message}`);
+    throw err;
+  }
+  assert.deepEqual(memory.loadMemory(linkedProject), { entries: [] });
+});
+
 test('upsertMemoryEntry creates a new entry and persists it to disk', () => {
   const dir = makeTempDir();
   const entry = memory.upsertMemoryEntry(dir, 'dev-port', 'App runs on 5001', ['flask']);

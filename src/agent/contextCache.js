@@ -3,13 +3,13 @@
 const fs = require('fs');
 const path = require('path');
 
-const CACHE_DIR_NAME = '.kode';
 const CACHE_FILE_NAME = 'context-cache.json';
+const { projectStatePath } = require('./projectStateStore');
 const MAX_ENTRIES = 50; // rotation cap — oldest-updated entries get dropped past this
 
 /**
  * Persists AgentCore's rolling context-summary cache (_contextSummaryCache in
- * core.js) to <project>/.kode/context-cache.json. Without this, a summary generated
+ * core.js) to Kode's per-user app data. Without this, a summary generated
  * once (an LLM call, up to a 20s timeout — see _summarizeDroppedHistory) had to be
  * regenerated from scratch every time the app restarted or a tab's AgentCore
  * instance was recreated mid-conversation, even though conversationHistory itself
@@ -24,7 +24,7 @@ const MAX_ENTRIES = 50; // rotation cap — oldest-updated entries get dropped p
  */
 
 function cacheFilePath(projectFolder) {
-  return path.join(projectFolder, CACHE_DIR_NAME, CACHE_FILE_NAME);
+  return projectStatePath(projectFolder, CACHE_FILE_NAME);
 }
 
 function loadCache(projectFolder) {
@@ -64,9 +64,9 @@ function setEntry(projectFolder, fingerprint, entry) {
       for (const k of keys.slice(0, keys.length - MAX_ENTRIES)) delete cache[k];
     }
 
-    const dir = path.join(projectFolder, CACHE_DIR_NAME);
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(cacheFilePath(projectFolder), JSON.stringify(cache, null, 2), 'utf-8');
+    const dir = path.dirname(cacheFilePath(projectFolder));
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(cacheFilePath(projectFolder), JSON.stringify(cache, null, 2), { encoding: 'utf-8', mode: 0o600 });
     return true;
   } catch (err) {
     console.warn('[ContextCache] Failed to save context cache:', err.message);

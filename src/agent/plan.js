@@ -2,8 +2,8 @@
 
 const fs = require('fs');
 const path = require('path');
+const { projectStatePath } = require('./projectStateStore');
 
-const PLAN_DIR_NAME = '.kode';
 const PLAN_FILE_NAME = 'plan.json';
 
 /**
@@ -14,15 +14,13 @@ const PLAN_FILE_NAME = 'plan.json';
  * (and how far through it the agent had gotten) was gone without a trace, other than
  * whatever the user happened to remember from reading the transcript.
  *
- * Stored at <projectFolder>/.kode/plan.json — same convention as memory.js's
- * memory.json, gitignored for the same reason (personal working data, not source).
- * getSystemPrompt (agent/prompts.js) surfaces an incomplete plan back to the model at
- * the start of a new turn/conversation, so a multi-step task doesn't have to be
- * re-explained from scratch after an app restart or a new chat on the same project.
+ * Stored outside the project tree so repository-controlled files cannot inject a
+ * persisted plan. AgentCore adds it to user context as untrusted progress data when
+ * a new turn resumes the project.
  */
 
 function planFilePath(projectFolder) {
-  return path.join(projectFolder, PLAN_DIR_NAME, PLAN_FILE_NAME);
+  return projectStatePath(projectFolder, PLAN_FILE_NAME);
 }
 
 /**
@@ -47,10 +45,11 @@ function loadPlan(projectFolder) {
 function savePlan(projectFolder, steps) {
   if (!projectFolder) return false;
   try {
-    const dir = path.join(projectFolder, PLAN_DIR_NAME);
-    fs.mkdirSync(dir, { recursive: true });
+    const filePath = planFilePath(projectFolder);
+    const dir = path.dirname(filePath);
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     const data = { steps, updatedAt: Date.now() };
-    fs.writeFileSync(planFilePath(projectFolder), JSON.stringify(data, null, 2), 'utf-8');
+    fs.writeFileSync(filePath, JSON.stringify(data, null, 2), { encoding: 'utf-8', mode: 0o600 });
     return true;
   } catch (err) {
     console.warn('[Plan] Failed to save plan file:', err.message);

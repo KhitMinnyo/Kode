@@ -22,7 +22,7 @@ test('getEntry returns null (not a throw) for a missing/null project folder or f
   assert.equal(contextCache.getEntry(makeTempDir(), null), null);
 });
 
-test('setEntry persists an entry to .kode/context-cache.json and getEntry reads it back', () => {
+test('setEntry persists an entry in app data and getEntry reads it back', () => {
   const dir = makeTempDir();
   const ok = contextCache.setEntry(dir, 'model-a::hello', { droppedCount: 5, summary: 'the user asked for X, files Y/Z were edited', scratchNote: '' });
   assert.equal(ok, true);
@@ -81,14 +81,14 @@ test('setEntry rotates out the oldest-updated entries once past MAX_ENTRIES (50)
 
 test('loadCache fails soft (empty object) on a corrupt cache file instead of throwing', () => {
   const dir = makeTempDir();
-  fs.mkdirSync(path.join(dir, '.kode'), { recursive: true });
+  fs.mkdirSync(path.dirname(contextCache.cacheFilePath(dir)), { recursive: true });
   fs.writeFileSync(contextCache.cacheFilePath(dir), 'not valid json{{{', 'utf-8');
   assert.deepEqual(contextCache.loadCache(dir), {});
 });
 
 test('loadCache fails soft when the cache file holds a JSON array instead of an object', () => {
   const dir = makeTempDir();
-  fs.mkdirSync(path.join(dir, '.kode'), { recursive: true });
+  fs.mkdirSync(path.dirname(contextCache.cacheFilePath(dir)), { recursive: true });
   fs.writeFileSync(contextCache.cacheFilePath(dir), '["not", "an", "object"]', 'utf-8');
   assert.deepEqual(contextCache.loadCache(dir), {});
 });

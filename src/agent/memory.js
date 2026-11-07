@@ -7,8 +7,8 @@ const path = require('path');
 // comparison a second time for memory entries.
 const { cosineSimilarity, DEFAULT_EMBED_MODEL } = require('./embeddings');
 
-const MEMORY_DIR_NAME = '.kode';
 const MEMORY_FILE_NAME = 'memory.json';
+const { projectStatePath } = require('./projectStateStore');
 const MAX_ENTRIES = 500;          // rotation cap — oldest-updated entries get dropped past this
 const MAX_VALUE_LENGTH = 4000;    // per-entry cap so one save_memory call can't balloon the file
 const COMPACT_THRESHOLD = 100;    // once past this many entries, try merging near-duplicates first
@@ -24,13 +24,26 @@ const MERGE_SIMILARITY_THRESHOLD = 0.93;
  * recall_memory tools — it's for durable facts ("the API uses port 5001", "user
  * prefers Tailwind over plain CSS"), not a transcript of the conversation.
  *
- * Stored at <projectFolder>/.kode/memory.json — plain JSON, no external dependency,
- * good enough for the scale of a single project's worth of notes. Gitignored by
- * default (see .gitignore) since it's personal working data, not source code.
+ * Stored in Kode's per-user app data so project-controlled files cannot inject or
+ * overwrite the agent's persistent memory.
  */
 
 function memoryFilePath(projectFolder) {
-  return path.join(projectFolder, MEMORY_DIR_NAME, MEMORY_FILE_NAME);
+  return projectStatePath(projectFolder, MEMORY_FILE_NAME);
+}
+
+function loadLegacyMemory(projectFolder) {
+  const dir = path.join(projectFolder, '.kode');
+  const filePath = path.join(dir, MEMORY_FILE_NAME);
+  try {
+    if (fs.lstatSync(dir).isSymbolicLink() || !fs.lstatSync(dir).isDirectory()) return null;
+    const stat = fs.lstatSync(filePath);
+    if (stat.isSymbolicLink() || !stat.isFile()) return null;
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    return parsed && Array.isArray(parsed.entries) ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 function emptyMemory() {
@@ -44,7 +57,7 @@ function loadMemory(projectFolder) {
   if (!projectFolder) return emptyMemory();
   try {
     const filePath = memoryFilePath(projectFolder);
-    if (!fs.existsSync(filePath)) return emptyMemory();
+    if (!fs.existsSync(filePath)) return loadLegacyMemory(projectFolder) || emptyMemory();
     const raw = fs.readFileSync(filePath, 'utf-8');
     const parsed = JSON.parse(raw);
     if (!parsed || !Array.isArray(parsed.entries)) return emptyMemory();
@@ -58,9 +71,9 @@ function loadMemory(projectFolder) {
 function saveMemory(projectFolder, memoryData) {
   if (!projectFolder) return false;
   try {
-    const dir = path.join(projectFolder, MEMORY_DIR_NAME);
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(memoryFilePath(projectFolder), JSON.stringify(memoryData, null, 2), 'utf-8');
+    const dir = path.dirname(memoryFilePath(projectFolder));
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(memoryFilePath(projectFolder), JSON.stringify(memoryData, null, 2), { encoding: 'utf-8', mode: 0o600 });
     return true;
   } catch (err) {
     console.warn('[Memory] Failed to save memory file:', err.message);

@@ -95,7 +95,7 @@ test('getSystemPrompt includes the full red-team playbook for uncensored models 
   assert.match(securityTask, /Red Team Operator Mode/);
 });
 
-test('getSystemPrompt resurfaces an incomplete persisted plan for the active project', async () => {
+test('getSystemPrompt does not elevate persisted project plans into system instructions', async () => {
   const fs = require('node:fs');
   const os = require('node:os');
   const path = require('node:path');
@@ -110,9 +110,8 @@ test('getSystemPrompt resurfaces an incomplete persisted plan for the active pro
   }, dir);
 
   const prompt = getSystemPrompt(dir, 'llama3.1:8b', 'continue where we left off');
-  assert.match(prompt, /Resuming an In-Progress Plan/);
-  assert.match(prompt, /\[x\] Read the file/);
-  assert.match(prompt, /\[ \] Fix the bug/);
+  assert.doesNotMatch(prompt, /Resuming an In-Progress Plan/);
+  assert.doesNotMatch(prompt, /Fix the bug/);
 });
 
 test('getSystemPrompt does not mention a plan when none is persisted or the project has none', () => {
@@ -125,7 +124,7 @@ test('getSystemPrompt does not mention a plan when none is persisted or the proj
   assert.doesNotMatch(getSystemPrompt(null, 'llama3.1:8b', 'hello'), /Resuming an In-Progress Plan/);
 });
 
-test('getSystemPrompt stops mentioning a plan once it has been completed', async () => {
+test('getSystemPrompt does not include plans whether complete or incomplete', async () => {
   const fs = require('node:fs');
   const os = require('node:os');
   const path = require('node:path');
@@ -133,8 +132,8 @@ test('getSystemPrompt stops mentioning a plan once it has been completed', async
 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kode-test-'));
   await tools.write_plan({ steps: [{ text: 'Only step', status: 'pending' }] }, dir);
-  assert.match(getSystemPrompt(dir, 'llama3.1:8b', 'go'), /Resuming an In-Progress Plan/);
+  assert.doesNotMatch(getSystemPrompt(dir, 'llama3.1:8b', 'go'), /Only step/);
 
   await tools.write_plan({ steps: [{ text: 'Only step', status: 'done' }] }, dir);
-  assert.doesNotMatch(getSystemPrompt(dir, 'llama3.1:8b', 'go'), /Resuming an In-Progress Plan/);
+  assert.doesNotMatch(getSystemPrompt(dir, 'llama3.1:8b', 'go'), /Only step/);
 });

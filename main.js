@@ -2,6 +2,7 @@
 
 const { app, BrowserWindow, ipcMain, dialog, nativeImage, shell, safeStorage } = require('electron');
 const path = require('path');
+const { fileURLToPath } = require('url');
 const fs = require('fs');
 const https = require('https');
 const crypto = require('crypto');
@@ -648,14 +649,21 @@ function createMainWindow() {
     return { action: 'deny' };
   });
 
-  mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (!url.startsWith('file://')) {
-      event.preventDefault();
-      if (url.startsWith('https://') || url.startsWith('http://')) {
-        shell.openExternal(url);
-      }
+  const guardNavigation = (event, url) => {
+    let isAppDocument = false;
+    try {
+      isAppDocument = new URL(url).protocol === 'file:' &&
+        path.resolve(fileURLToPath(url)) === path.resolve(__dirname, 'src', 'renderer', 'index.html');
+    } catch { /* malformed and non-file URLs are blocked below */ }
+    if (isAppDocument) return;
+
+    event.preventDefault();
+    if (url.startsWith('https://') || url.startsWith('http://')) {
+      shell.openExternal(url);
     }
-  });
+  };
+  mainWindow.webContents.on('will-navigate', guardNavigation);
+  mainWindow.webContents.on('will-redirect', guardNavigation);
 
   // Show window when content is ready
   mainWindow.once('ready-to-show', () => {

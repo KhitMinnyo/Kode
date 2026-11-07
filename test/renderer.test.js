@@ -39,7 +39,7 @@ const RENDERER_DIR = path.join(__dirname, '..', 'src', 'renderer');
  * stubbed window.kode IPC bridge whose calls are all captured for assertions.
  * Every test gets its own independent window/app instance.
  */
-async function bootApp() {
+async function bootApp({ models = [{ name: 'fake-model' }] } = {}) {
   const html = fs.readFileSync(path.join(RENDERER_DIR, 'index.html'), 'utf8');
   const dom = new JSDOM(html, { url: 'file://' + RENDERER_DIR + '/index.html' });
   const { window } = dom;
@@ -109,7 +109,7 @@ async function bootApp() {
   let chatCounter = 0;
 
   window.kode = {
-    listModels: async () => ({ models: [{ name: 'fake-model' }], provider: 'ollama' }),
+    listModels: async () => ({ models, provider: 'ollama' }),
     checkConnection: async () => ({ connected: true, provider: 'ollama' }),
     getAppVersion: async () => '1.1.2',
     checkForUpdates: async () => ({ updateAvailable: false }),
@@ -194,6 +194,14 @@ contents` };
 
   return { dom, window, document, captured };
 }
+
+test('provider-supplied model names are rendered as text, not HTML', async () => {
+  const { dom, document } = await bootApp({ models: [{ name: '<img src=x onerror=alert(1)>' }] });
+  after(() => dom.window.close());
+  const title = document.getElementById('chat-title');
+  assert.equal(title.querySelector('img'), null);
+  assert.equal(title.querySelector('strong').textContent, '<img src=x onerror=alert(1)>');
+});
 
 test('renderer parallel tabs and ask_user modal', async (t) => {
   const { dom, document, captured } = await bootApp();

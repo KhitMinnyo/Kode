@@ -1,6 +1,7 @@
 'use strict';
 
 const { EventEmitter } = require('events');
+const { spawn } = require('child_process');
 
 // Cap per-process log buffer so a chatty server (e.g. an access-log-per-request dev
 // server) can't grow memory unbounded over a long-running session.
@@ -86,7 +87,12 @@ class ProcessManager extends EventEmitter {
     const entry = this.processes.get(pid);
     if (!entry || entry.status !== 'running') return false;
     try {
-      process.kill(-pid, 'SIGTERM');
+      if (process.platform === 'win32') {
+        const killer = spawn('taskkill', ['/pid', String(pid), '/t', '/f'], { windowsHide: true, stdio: 'ignore' });
+        killer.on('error', () => { try { entry.child?.kill('SIGKILL'); } catch { /* already exited */ } });
+      } else {
+        process.kill(-pid, 'SIGTERM');
+      }
     } catch {
       try {
         if (entry.child) entry.child.kill('SIGTERM');

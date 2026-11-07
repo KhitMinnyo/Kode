@@ -2,11 +2,12 @@
 
 const fs = require('fs');
 const path = require('path');
+const { projectStatePath } = require('./projectStateStore');
 
 const TASK_STATE_FILE = 'task-state.json';
 
 function taskStatePath(projectFolder) {
-  return projectFolder ? path.join(projectFolder, '.kode', TASK_STATE_FILE) : null;
+  return projectStatePath(projectFolder, TASK_STATE_FILE);
 }
 
 function classifyTask(message = '') {
@@ -60,8 +61,8 @@ function saveTaskState(projectFolder, state) {
   const filePath = taskStatePath(projectFolder);
   if (!filePath || !state) return false;
   try {
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, JSON.stringify({ ...state, updatedAt: Date.now() }, null, 2), 'utf-8');
+    fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(filePath, JSON.stringify({ ...state, updatedAt: Date.now() }, null, 2), { encoding: 'utf-8', mode: 0o600 });
     return true;
   } catch (err) {
     console.warn('[TaskState] Failed to save task state:', err.message);

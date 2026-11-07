@@ -8,6 +8,7 @@ const plan = require('./plan');
 const processManager = require('./processManager');
 const { parseUnifiedDiff, applyHunksToContent, PatchError } = require('./patch');
 const embeddings = require('./embeddings');
+const { stateRoot, projectStatePath } = require('./projectStateStore');
 
 const MAX_FILE_READ_SIZE = 50 * 1024; // 50KB
 const EXTERNAL_FETCH_TIMEOUT = 15000; // 15 seconds — for calls to external APIs (Firecrawl, Brave Search)
@@ -88,11 +89,45 @@ function friendlyShellSpawnError(err) {
  */
 async function fetchWithTimeout(url, options = {}, timeout = EXTERNAL_FETCH_TIMEOUT) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeout);
+  const parentSignal = options.signal;
+  const onParentAbort = () => controller.abort(parentSignal.reason);
+  if (parentSignal) {
+    if (parentSignal.aborted) onParentAbort();
+    else parentSignal.addEventListener('abort', onParentAbort, { once: true });
+  }
+  const timer = setTimeout(() => controller.abort(new Error('Request timed out')), timeout);
   try {
-    return await fetch(url, { ...options, signal: controller.signal });
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    if (!response.body || typeof response.body.getReader !== 'function') return response;
+
+    const reader = response.body.getReader();
+    const chunks = [];
+    let size = 0;
+    const maxBytes = 2 * 1024 * 1024;
+    let complete = false;
+    while (!complete) {
+      const { done, value } = await reader.read();
+      if (done) {
+        complete = true;
+        continue;
+      }
+      size += value.byteLength;
+      if (size > maxBytes) {
+        await reader.cancel().catch(() => {});
+        throw new Error(`Response exceeded the ${maxBytes} byte limit`);
+      }
+      chunks.push(value);
+    }
+    const body = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) {
+      body.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
   } finally {
     clearTimeout(timer);
+    if (parentSignal) parentSignal.removeEventListener('abort', onParentAbort);
   }
 }
 
@@ -151,9 +186,49 @@ function syntaxCheckSuffix(absPath) {
   return `\n⚠️ Syntax check found a problem — the file was still written, but likely won't run as-is:\n${check.error}`;
 }
 
+async function resolveProjectPath(filePath, projectFolder, toolContext = {}, action = 'access') {
+  const resolvedPath = path.isAbsolute(filePath) ? path.resolve(filePath) : path.resolve(projectFolder || process.cwd(), filePath);
+  if (!projectFolder) return { path: resolvedPath };
+
+  try {
+    const root = fs.realpathSync(projectFolder);
+    let probe = resolvedPath;
+    let probeExists = false;
+    while (!probeExists) {
+      try {
+        fs.lstatSync(probe);
+        probeExists = true;
+      } catch (err) {
+        if (err.code !== 'ENOENT' && err.code !== 'ENOTDIR') throw err;
+        const parent = path.dirname(probe);
+        if (parent === probe) throw err;
+        probe = parent;
+      }
+    }
+    const canonicalProbe = fs.realpathSync(probe);
+    const canonicalTarget = path.resolve(canonicalProbe, path.relative(probe, resolvedPath));
+    const relative = path.relative(root, canonicalTarget);
+    const inside = relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+    if (inside) return { path: resolvedPath };
+  } catch (err) {
+    return { error: `❌ Refused unsafe project path: ${err.message}` };
+  }
+
+  if (typeof toolContext.confirmRiskyCommand !== 'function') {
+    return { error: `🚫 Blocked: ${action} outside the selected project requires user approval. Enable command confirmations in Settings and retry.` };
+  }
+  let approved = false;
+  try {
+    approved = await toolContext.confirmRiskyCommand(`${action}: ${resolvedPath}`, `${action} outside the selected project`);
+  } catch (err) {
+    console.warn('[project path authorization] approval callback failed closed:', err.message);
+  }
+  return approved ? { path: resolvedPath } : { error: `🚫 Blocked: user did not approve ${action} outside the selected project.` };
+}
+
 /**
  * When a tool result's output exceeds its truncation cap, saves the FULL text to
- * <project>/.kode/scans/<timestamp>-<label>.txt instead of just discarding everything
+ * Kode's per-user app data instead of just discarding everything
  * past the cutoff. Pentest scans especially (nmap -A, nikto, sqlmap --dump) routinely
  * produce far more than a truncation cap's worth of directly relevant detail — losing
  * everything past the first few KB with no way to recover it undermines the point of
@@ -165,15 +240,15 @@ function syntaxCheckSuffix(absPath) {
 function saveFullOutput(projectFolder, label, fullText) {
   if (!projectFolder) return '';
   try {
-    const dir = path.join(projectFolder, '.kode', 'scans');
-    fs.mkdirSync(dir, { recursive: true });
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     const safeLabel = String(label || 'output').trim().split(/\s+/)[0].replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40) || 'output';
     const fileName = `${stamp}-${safeLabel}.txt`;
-    fs.writeFileSync(path.join(dir, fileName), fullText, 'utf-8');
-    return `\n📁 Full output (${fullText.length} bytes) saved to .kode/scans/${fileName} — use read_file with offset/limit to see the rest.`;
+    const outputPath = projectStatePath(projectFolder, path.join('scans', fileName));
+    fs.mkdirSync(path.dirname(outputPath), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(outputPath, fullText, { encoding: 'utf-8', mode: 0o600 });
+    return `\n📁 Full output (${fullText.length} bytes) saved to ${outputPath} — use read_file with offset/limit to see the rest.`;
   } catch (err) {
-    console.warn('[Tools] Failed to save full output to .kode/scans:', err.message);
+    console.warn('[Tools] Failed to save full output to app data:', err.message);
     return '';
   }
 }
@@ -182,7 +257,7 @@ function saveFullOutput(projectFolder, label, fullText) {
  * Tool: create_file
  * Creates a new file with the given content. Automatically creates parent directories.
  */
-async function create_file(params, projectFolder) {
+async function create_file(params, projectFolder, toolContext = {}) {
   const { path: filePath, content } = params;
 
   if (!filePath) {
@@ -193,7 +268,9 @@ async function create_file(params, projectFolder) {
   }
 
   try {
-    const resolvedPath = path.isAbsolute(filePath) ? filePath : path.resolve(projectFolder || process.cwd(), filePath);
+    const authorized = await resolveProjectPath(filePath, projectFolder, toolContext, 'write file');
+    if (authorized.error) return authorized.error;
+    const resolvedPath = authorized.path;
     const dir = path.dirname(resolvedPath);
 
     // Create parent directories if they don't exist
@@ -331,7 +408,7 @@ async function web_search(params, projectFolder, toolContext = {}) {
  * Tool: edit_file
  * Edits an existing file by performing a find-and-replace operation.
  */
-async function edit_file(params, projectFolder) {
+async function edit_file(params, projectFolder, toolContext = {}) {
   const { path: filePath, old_content, new_content } = params;
 
   if (!filePath) {
@@ -345,7 +422,9 @@ async function edit_file(params, projectFolder) {
   }
 
   try {
-    const resolvedPath = path.isAbsolute(filePath) ? filePath : path.resolve(projectFolder || process.cwd(), filePath);
+    const authorized = await resolveProjectPath(filePath, projectFolder, toolContext, 'edit file');
+    if (authorized.error) return authorized.error;
+    const resolvedPath = authorized.path;
 
     if (!fs.existsSync(resolvedPath)) {
       return `❌ Error: File not found: ${resolvedPath}`;
@@ -384,7 +463,7 @@ async function edit_file(params, projectFolder) {
  * large file instead — read the next chunk, jump to a line search_files pointed at,
  * etc — without ever loading the parts it doesn't need.
  */
-async function read_file(params, projectFolder) {
+async function read_file(params, projectFolder, toolContext = {}) {
   const { path: filePath, offset, limit } = params;
 
   if (!filePath) {
@@ -392,7 +471,9 @@ async function read_file(params, projectFolder) {
   }
 
   try {
-    const resolvedPath = path.isAbsolute(filePath) ? filePath : path.resolve(projectFolder || process.cwd(), filePath);
+    const authorized = await resolveProjectPath(filePath, projectFolder, toolContext, 'read file');
+    if (authorized.error) return authorized.error;
+    const resolvedPath = authorized.path;
 
     if (!fs.existsSync(resolvedPath)) {
       return `❌ Error: File not found: ${resolvedPath}`;
@@ -497,6 +578,11 @@ function runShellCommandAsync(command, { cwd, timeoutMs, maxBuffer = 2 * 1024 * 
 
     const killGroup = (sig) => {
       if (!child.pid) return;
+      if (process.platform === 'win32') {
+        const killer = spawn('taskkill', ['/pid', String(child.pid), '/t', '/f'], { windowsHide: true, stdio: 'ignore' });
+        killer.on('error', () => { try { child.kill('SIGKILL'); } catch { /* process already exited */ } });
+        return;
+      }
       try { process.kill(-child.pid, sig); } catch { /* already dead, or never became a group leader */ }
     };
 
@@ -562,6 +648,46 @@ function runShellCommandAsync(command, { cwd, timeoutMs, maxBuffer = 2 * 1024 * 
  *   toolContext.signal - Optional AbortSignal; aborting it kills an in-flight command
  *   immediately (wired to the Stop button — see AgentCore.stopGeneration()).
  */
+async function authorizeShellCommand(command, toolContext = {}) {
+  const dangerous = [
+    /^\s*(sudo\s+)?rm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+)?\/\s*$/,
+    /^\s*(sudo\s+)?rm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+)?(\/\*|~\/\*|\$HOME\/\*)$/,
+    /^\s*(sudo\s+)?rm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+(~|\$HOME)\s*$/,
+    /^\s*(sudo\s+)?rm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+\/(System|Library|Applications|bin|usr|etc|var|boot)(\/|\s*$)/i,
+    /^\s*(sudo\s+)?rm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+\/Users(\/[a-zA-Z0-9_.-]+)?\s*$/i,
+    /mkfs\./,
+    /dd\s+if=.*of=\/dev\//,
+    />\s*\/dev\/(disk\d|sd[a-z]|nvme\d|rdisk\d)\b/i,
+    /diskutil\s+(erasedisk|eraseVolume|reformat)/i,
+    /^\s*(sudo\s+)?chmod\s+-R\s+777\s+\/\s*$/,
+    /:\s*\(\s*\)\s*\{[\s\S]*:\s*\|\s*:[\s\S]*\}\s*;\s*:/,
+  ];
+  if (dangerous.some(pattern => pattern.test(command))) {
+    return { blocked: true, result: `🚫 Blocked: This command appears to be destructive and has been blocked for safety.\nCommand: ${command}` };
+  }
+
+  const risky = [
+    { pattern: /curl[^|]*\|\s*(sudo\s+)?(ba)?sh\b/i, label: 'piping a downloaded script directly into a shell' },
+    { pattern: /wget[^|]*\|\s*(sudo\s+)?(ba)?sh\b/i, label: 'piping a downloaded script directly into a shell' },
+    { pattern: /base64\s+-d[^|]*\|\s*(ba)?sh\b/i, label: 'executing a base64-decoded payload' },
+    { pattern: /eval\s*\(\s*(curl|wget)/i, label: 'evaluating remotely-fetched code' },
+  ].find(entry => entry.pattern.test(command));
+  if (!risky) return { blocked: false, warning: '' };
+
+  if (typeof toolContext.confirmRiskyCommand === 'function') {
+    let approved = false;
+    try {
+      approved = await toolContext.confirmRiskyCommand(command, risky.label);
+    } catch (err) {
+      console.warn('[command authorization] approval callback failed closed:', err.message);
+    }
+    if (!approved) {
+      return { blocked: true, result: `🚫 Blocked: user declined to approve this command (${risky.label}).\nCommand: ${command}` };
+    }
+  }
+  return { blocked: false, warning: `⚠️ Risk note: this command involves ${risky.label} — review it carefully before trusting the output.\n\n` };
+}
+
 async function run_command(params, projectFolder, toolContext = {}) {
   const { command } = params;
 
@@ -569,69 +695,9 @@ async function run_command(params, projectFolder, toolContext = {}) {
     return '❌ Error: "command" parameter is required.';
   }
 
-  // Safety check: block extremely destructive commands. This is a blocklist, not a
-  // sandbox — it catches known-catastrophic patterns but a local model can still
-  // hallucinate other harmful commands. Since Kode can also be pointed at its own
-  // source folder (self-editing), a wipe of $HOME or the app's own repo is just as
-  // real a risk as wiping the system, so those are covered here too.
-  const dangerous = [
-    /^\s*(sudo\s+)?rm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+)?\/\s*$/,  // rm -rf /
-    /^\s*(sudo\s+)?rm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+)?(\/\*|~\/\*|\$HOME\/\*)$/,  // rm -rf /* or ~/* or $HOME/*
-    /^\s*(sudo\s+)?rm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+(~|\$HOME)\s*$/,  // rm -rf ~ or $HOME (whole home dir)
-    /^\s*(sudo\s+)?rm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+\/(System|Library|Applications|bin|usr|etc|var|boot)(\/|\s*$)/i,  // rm -rf on core system dirs
-    /^\s*(sudo\s+)?rm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+\/Users(\/[a-zA-Z0-9_.-]+)?\s*$/i,  // rm -rf /Users or /Users/<name>
-    /mkfs\./,
-    /dd\s+if=.*of=\/dev\//,
-    />\s*\/dev\/(disk\d|sd[a-z]|nvme\d|rdisk\d)\b/i,  // overwriting a raw disk device via redirection
-    /diskutil\s+(erasedisk|eraseVolume|reformat)/i,
-    /^\s*(sudo\s+)?chmod\s+-R\s+777\s+\/\s*$/,  // chmod -R 777 /
-    // Fork bomb, e.g. `:(){ :|:& };:` — the naive version of this regex (missing
-    // escaped parens/braces) silently failed to match the actual fork bomb string at
-    // all, since `()` was parsed as an empty capture group instead of literal
-    // characters. This version matches the classic form and common whitespace variants.
-    /:\s*\(\s*\)\s*\{[\s\S]*:\s*\|\s*:[\s\S]*\}\s*;\s*:/,
-  ];
-
-  for (const pattern of dangerous) {
-    if (pattern.test(command)) {
-      return `🚫 Blocked: This command appears to be destructive and has been blocked for safety.\nCommand: ${command}`;
-    }
-  }
-
-  // Warn-but-allow tier: patterns that are legitimate in red-team/pentest workflows
-  // (e.g. fetching and running a recon script on a Kali box) but are also a classic
-  // remote-code-execution shape. Always labeled with a risk note in the result; when
-  // Settings → Safety → "confirm risky commands" is on (the default — see
-  // toolContext.confirmRiskyCommand below), execution also pauses for user approval
-  // instead of running automatically.
-  const riskyButAllowed = [
-    { pattern: /curl[^|]*\|\s*(sudo\s+)?(ba)?sh\b/i, label: 'piping a downloaded script directly into a shell' },
-    { pattern: /wget[^|]*\|\s*(sudo\s+)?(ba)?sh\b/i, label: 'piping a downloaded script directly into a shell' },
-    { pattern: /base64\s+-d[^|]*\|\s*(ba)?sh\b/i, label: 'executing a base64-decoded payload' },
-    { pattern: /eval\s*\(\s*(curl|wget)/i, label: 'evaluating remotely-fetched code' },
-  ];
-  let riskWarning = '';
-  let matchedRisky = null;
-  for (const entry of riskyButAllowed) {
-    if (entry.pattern.test(command)) {
-      matchedRisky = entry;
-      riskWarning = `⚠️ Risk note: this command involves ${entry.label} — review it carefully before trusting the output.\n\n`;
-      break;
-    }
-  }
-
-  if (matchedRisky && typeof toolContext.confirmRiskyCommand === 'function') {
-    let approved;
-    try {
-      approved = await toolContext.confirmRiskyCommand(command, matchedRisky.label);
-    } catch (err) {
-      console.warn('[run_command] confirmRiskyCommand callback threw, failing safe (deny):', err.message);
-      approved = false;
-    }
-    if (!approved) {
-      return `🚫 Blocked: user declined to approve this command (${matchedRisky.label}).\nCommand: ${command}`;
-    }
-  }
+  const authorization = await authorizeShellCommand(command, toolContext);
+  if (authorization.blocked) return authorization.result;
+  const riskWarning = authorization.warning;
 
   // Detect server-start commands that run indefinitely
   const serverPatterns = [
@@ -667,35 +733,47 @@ async function run_command(params, projectFolder, toolContext = {}) {
           stdio: ['ignore', 'pipe', 'pipe'],
         });
 
-        // Collect early output (first 3 seconds) to detect startup errors
+        // Keep only a bounded startup sample; ProcessManager owns logs after startup.
         let earlyStdout = '';
         let earlyStderr = '';
-        child.stdout.on('data', (data) => { earlyStdout += data.toString(); });
-        child.stderr.on('data', (data) => { earlyStderr += data.toString(); });
+        const collectStdout = (data) => { earlyStdout = (earlyStdout + data.toString()).slice(-16000); };
+        const collectStderr = (data) => { earlyStderr = (earlyStderr + data.toString()).slice(-16000); };
+        child.stdout.on('data', collectStdout);
+        child.stderr.on('data', collectStderr);
 
-        // Wait 3 seconds to see if it crashes immediately
+        // Resolve on every exit/startup outcome and honor Stop during the startup window.
         const startResult = await new Promise((resolve) => {
-          let exited = false;
-
-          child.on('exit', (code) => {
-            exited = true;
-            if (code !== 0) {
-              resolve({ ok: false, error: earlyStderr || earlyStdout || `Exit code: ${code}` });
+          let settled = false;
+          const finish = (result) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(startTimer);
+            if (toolContext.signal) toolContext.signal.removeEventListener('abort', onAbort);
+            resolve(result);
+          };
+          const onAbort = () => {
+            if (process.platform === 'win32') {
+              const killer = spawn('taskkill', ['/pid', String(child.pid), '/t', '/f'], { windowsHide: true, stdio: 'ignore' });
+              killer.on('error', () => { try { child.kill('SIGKILL'); } catch { /* already exited */ } });
             }
-          });
-
-          setTimeout(() => {
-            if (!exited) {
-              // Still running after 3s = server started successfully. Previously the
-              // stdout/stderr listeners were torn down and the child fully detached
-              // here, which meant any output printed after this point (request logs,
-              // later crashes) was silently lost with no way to see it from the UI.
-              // Instead, keep piping output into processManager's rolling log buffer
-              // so a "Processes" panel can show live logs and let the user stop it.
-              resolve({ ok: true, pid: child.pid });
-            }
-          }, 3000);
+            else { try { process.kill(-child.pid, 'SIGTERM'); } catch { child.kill('SIGTERM'); } }
+            finish({ ok: false, aborted: true, error: 'Stopped by user.' });
+          };
+          const onExit = (code) => finish({ ok: false, error: earlyStderr || earlyStdout || `Exit code: ${code}` });
+          const onError = (err) => finish({ ok: false, error: friendlyShellSpawnError(err) });
+          const startTimer = setTimeout(() => finish({ ok: true, pid: child.pid }), 3000);
+          child.once('exit', onExit);
+          child.once('error', onError);
+          if (toolContext.signal) {
+            if (toolContext.signal.aborted) onAbort();
+            else toolContext.signal.addEventListener('abort', onAbort, { once: true });
+          }
         });
+
+        child.stdout.removeListener('data', collectStdout);
+        child.stderr.removeListener('data', collectStderr);
+
+        if (startResult.aborted) return `🛑 Server start stopped by user:\n$ ${command}`;
 
         if (!startResult.ok) {
           return `❌ Server failed to start:\n$ ${command}\n${startResult.error}`;
@@ -767,7 +845,7 @@ async function run_command(params, projectFolder, toolContext = {}) {
     }
     // Truncate very long output (5KB for scan results) — but never just lose the rest
     // of it: nmap/nikto/sqlmap/etc routinely produce far more than 5KB of directly
-    // relevant detail, so anything past the cutoff is saved in full to .kode/scans/
+    // relevant detail, so anything past the cutoff is saved in full to app data
     // (see saveFullOutput) rather than discarded.
     const maxLen = 5000;
     let truncated = output;
@@ -786,7 +864,7 @@ async function run_command(params, projectFolder, toolContext = {}) {
  * Tool: list_directory
  * Lists the contents of a directory with file type and size information.
  */
-async function list_directory(params, projectFolder) {
+async function list_directory(params, projectFolder, toolContext = {}) {
   const { path: dirPath } = params;
 
   if (!dirPath) {
@@ -794,7 +872,9 @@ async function list_directory(params, projectFolder) {
   }
 
   try {
-    const resolvedPath = path.isAbsolute(dirPath) ? dirPath : path.resolve(projectFolder || process.cwd(), dirPath);
+    const authorized = await resolveProjectPath(dirPath, projectFolder, toolContext, 'list directory');
+    if (authorized.error) return authorized.error;
+    const resolvedPath = authorized.path;
 
     if (!fs.existsSync(resolvedPath)) {
       return `❌ Error: Directory not found: ${resolvedPath}`;
@@ -859,39 +939,69 @@ function formatFileSize(bytes) {
  * Tool: http_request
  * Makes HTTP/HTTPS requests (GET, POST, etc.) for API testing, vulnerability probing.
  */
-async function http_request(params, projectFolder) {
+async function http_request(params, projectFolder, toolContext = {}) {
   const { url, method = 'GET', headers = {}, body = null } = params;
 
   if (!url) return '❌ Error: "url" parameter is required.';
 
   try {
     const parsedUrl = new URL(url);
+    if (!['http:', 'https:'].includes(parsedUrl.protocol)) return '❌ Error: only HTTP and HTTPS URLs are supported.';
     const httpModule = parsedUrl.protocol === 'https:' ? require('https') : require('http');
 
     return new Promise((resolve) => {
+      let settled = false;
+      let received = 0;
+      const chunks = [];
+      const MAX_RESPONSE_BYTES = 1024 * 1024;
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(deadline);
+        if (toolContext.signal) toolContext.signal.removeEventListener('abort', onAbort);
+        resolve(result);
+      };
       const options = {
         hostname: parsedUrl.hostname,
         port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
         path: parsedUrl.pathname + parsedUrl.search,
         method: method.toUpperCase(),
         headers: { 'User-Agent': 'Kode-Agent/1.0', ...headers },
-        timeout: 15000,
       };
 
       const req = httpModule.request(options, (res) => {
-        let data = '';
-        res.on('data', chunk => { data += chunk; });
+        res.on('data', chunk => {
+          received += chunk.length;
+          if (received > MAX_RESPONSE_BYTES) {
+            req.destroy();
+            return finish(`❌ Response exceeded the ${MAX_RESPONSE_BYTES} byte limit.`);
+          }
+          chunks.push(chunk);
+        });
         res.on('end', () => {
+          const data = Buffer.concat(chunks).toString('utf-8');
           const headerLines = Object.entries(res.headers)
             .map(([k, v]) => `  ${k}: ${v}`).join('\n');
           const preview = data.length > 3000 ? data.substring(0, 3000) + '\n...(truncated)' : data;
-          resolve(`🌐 HTTP ${res.statusCode} ${res.statusMessage}\n` +
+          finish(`🌐 HTTP ${res.statusCode} ${res.statusMessage}\n` +
                   `URL: ${url}\nMethod: ${method}\n\nHeaders:\n${headerLines}\n\nBody (${data.length} bytes):\n${preview}`);
         });
+        res.on('error', (err) => finish(`❌ Request failed: ${err.message}`));
       });
 
-      req.on('error', (e) => resolve(`❌ Request failed: ${e.message}`));
-      req.on('timeout', () => { req.destroy(); resolve('⏱️ Request timed out (15s)'); });
+      const deadline = setTimeout(() => {
+        req.destroy();
+        finish('⏱️ Request timed out (15s)');
+      }, 15000);
+      const onAbort = () => {
+        req.destroy();
+        finish('🛑 Request stopped by user.');
+      };
+      req.on('error', (e) => finish(`❌ Request failed: ${e.message}`));
+      if (toolContext.signal) {
+        if (toolContext.signal.aborted) return onAbort();
+        toolContext.signal.addEventListener('abort', onAbort, { once: true });
+      }
 
       if (body) req.write(typeof body === 'string' ? body : JSON.stringify(body));
       req.end();
@@ -911,13 +1021,15 @@ async function http_request(params, projectFolder) {
 // before ever reaching the user's own code.
 const SEARCH_EXCLUDE_DIRS = ['node_modules', '.git', '.kode', 'dist', 'build', 'out', '__pycache__', 'venv', '.venv', 'vendor', 'target', '.next', '.cache', 'coverage'];
 
-async function search_files(params, projectFolder) {
+async function search_files(params, projectFolder, toolContext = {}) {
   const { pattern, path: searchPath = '.', file_pattern = '' } = params;
 
   if (!pattern) return '❌ Error: "pattern" parameter is required.';
 
   try {
-    const resolvedPath = path.isAbsolute(searchPath) ? searchPath : path.resolve(projectFolder || process.cwd(), searchPath);
+    const authorized = await resolveProjectPath(searchPath, projectFolder, toolContext, 'search files');
+    if (authorized.error) return authorized.error;
+    const resolvedPath = authorized.path;
 
     // Build grep's argument list directly and run it WITHOUT a shell (execFileSync,
     // not the old execSync(..., { shell: true })). The old shell string only escaped
@@ -1147,13 +1259,13 @@ function redactSecret(text) {
   return `${text.slice(0, 4)}${'*'.repeat(Math.min(text.length - 8, 24))}${text.slice(-4)}`;
 }
 
-async function security_audit(params = {}, projectFolder) {
+async function security_audit(params = {}, projectFolder, toolContext = {}) {
   if (!projectFolder) return '❌ Error: security_audit requires an active project folder.';
 
   const scopePath = params.path && String(params.path).trim();
-  const root = scopePath
-    ? (path.isAbsolute(scopePath) ? scopePath : path.resolve(projectFolder, scopePath))
-    : projectFolder;
+  const authorized = await resolveProjectPath(scopePath || '.', projectFolder, toolContext, 'audit files');
+  if (authorized.error) return authorized.error;
+  const root = authorized.path;
 
   if (!fs.existsSync(root)) return `❌ Error: "${root}" not found.`;
 
@@ -1323,55 +1435,52 @@ async function git_diff(params = {}, projectFolder) {
   }
 }
 
-/**
- * Tool: git_checkpoint
- * Stages everything and commits it as a labeled safety-net checkpoint, so risky edits
- * can always be undone with git_revert. Unlike the other git_* tools, this one
- * auto-initializes a repo the first time it's called — the whole point is that the
- * model (and the user) never have to think about git setup to get the safety net.
- */
+function checkpointRecordPath(projectFolder) {
+  const key = require('crypto').createHash('sha256').update(path.resolve(projectFolder)).digest('hex');
+  return path.join(stateRoot(), 'checkpoints', `${key}.json`);
+}
+
+/** Create a private Git commit object with a temporary index; do not alter the user's index or branch. */
 async function git_checkpoint(params = {}, projectFolder) {
   if (!projectFolder) return '❌ Error: git_checkpoint requires an active project folder.';
 
   const message = (params.message && String(params.message).trim()) || 'Kode checkpoint';
-  let initNote = '';
 
   try {
-    if (!gitToplevel(projectFolder)) {
-      execFileSync('git', ['init'], { cwd: projectFolder, encoding: 'utf-8', timeout: 10000 });
-      // A commit needs an identity; only set one locally (this repo only) and only if
-      // none is configured at all, so we never clobber a real user identity.
-      try {
-        execFileSync('git', ['config', 'user.name'], { cwd: projectFolder, encoding: 'utf-8' });
-      } catch {
-        execFileSync('git', ['config', 'user.email', 'kode-agent@local'], { cwd: projectFolder });
-        execFileSync('git', ['config', 'user.name', 'Kode Agent'], { cwd: projectFolder });
-      }
-      initNote = `🆕 Initialized a new git repository in "${projectFolder}" for checkpointing.\n`;
-    }
-
-    execFileSync('git', ['add', '-A'], { cwd: projectFolder, timeout: 30000, maxBuffer: 4 * 1024 * 1024 });
-
-    // Nothing to commit is not an error — it just means the tree already matches the
-    // last checkpoint (or the repo is genuinely empty).
-    let staged;
+    if (!gitToplevel(projectFolder)) return notAGitRepoError(projectFolder);
+    const cwd = projectFolder;
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf-8', timeout: 10000 }).trim();
+    const stateDir = path.dirname(checkpointRecordPath(projectFolder));
+    fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+    const indexPath = path.join(stateDir, `index-${process.pid}-${Date.now()}`);
+    const env = { ...process.env, GIT_INDEX_FILE: indexPath };
     try {
-      staged = execFileSync('git', ['diff', '--cached', '--stat'], { cwd: projectFolder, encoding: 'utf-8', timeout: 15000 }).trim();
-    } catch {
-      staged = '';
+      execFileSync('git', ['read-tree', head], { cwd, env, timeout: 15000 });
+      execFileSync('git', ['add', '-A', '--', '.'], { cwd, env, timeout: 30000, maxBuffer: 4 * 1024 * 1024 });
+      const tree = execFileSync('git', ['write-tree'], { cwd, env, encoding: 'utf-8', timeout: 15000 }).trim();
+      const headTree = execFileSync('git', ['rev-parse', `${head}^{tree}`], { cwd, encoding: 'utf-8', timeout: 10000 }).trim();
+      let previousTree = headTree;
+      let hasPrevious = false;
+      try {
+        const previous = JSON.parse(fs.readFileSync(checkpointRecordPath(projectFolder), 'utf-8'));
+        previousTree = execFileSync('git', ['rev-parse', `${previous.snapshot}^{tree}`], { cwd, encoding: 'utf-8', timeout: 10000 }).trim();
+        hasPrevious = true;
+      } catch { /* first checkpoint */ }
+      if (hasPrevious && tree === previousTree) return '📊 Nothing new to checkpoint — the selected project matches the last snapshot.';
+      const snapshot = execFileSync('git', ['commit-tree', tree, '-p', head, '-m', `Kode checkpoint: ${message}`], {
+        cwd,
+        encoding: 'utf-8',
+        timeout: 15000,
+        env: { ...env, GIT_AUTHOR_NAME: 'Kode Agent', GIT_AUTHOR_EMAIL: 'kode-agent@local', GIT_COMMITTER_NAME: 'Kode Agent', GIT_COMMITTER_EMAIL: 'kode-agent@local' },
+      }).trim();
+      const projectRef = `refs/kode/checkpoints/${require('crypto').createHash('sha256').update(path.resolve(projectFolder)).digest('hex')}`;
+      execFileSync('git', ['update-ref', projectRef, snapshot], { cwd, timeout: 10000 });
+      const record = checkpointRecordPath(projectFolder);
+      fs.writeFileSync(record, JSON.stringify({ snapshot, message, updatedAt: Date.now() }), { encoding: 'utf-8', mode: 0o600 });
+      return `✅ Private checkpoint created (${snapshot.slice(0, 8)}): "${message}". Your Git branch and index were not changed.`;
+    } finally {
+      try { fs.unlinkSync(indexPath); } catch { /* no temporary index was created */ }
     }
-    if (!staged) {
-      return `${initNote}📊 Nothing to checkpoint — working tree already matches the last commit.`;
-    }
-
-    execFileSync('git', ['commit', '-m', `Kode checkpoint: ${message}`], {
-      cwd: projectFolder,
-      encoding: 'utf-8',
-      timeout: 15000,
-    });
-
-    const shortHash = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: projectFolder, encoding: 'utf-8', timeout: 10000 }).trim();
-    return `${initNote}✅ Checkpoint created (${shortHash}): "${message}"\n${staged}\n\nUse git_revert to undo back to a checkpoint if a later change goes wrong.`;
   } catch (err) {
     return `❌ git_checkpoint failed: ${(err.stderr || err.message || '').toString().trim()}`;
   }
@@ -1380,36 +1489,38 @@ async function git_checkpoint(params = {}, projectFolder) {
 /**
  * Tool: git_revert
  * The undo half of the checkpoint safety net.
- *   - With `file` and no `ref`: discards uncommitted changes to that one file only
- *     (safe — cannot lose a commit).
- *   - With `file` and `ref`: restores that one file's content from an earlier ref.
- *   - With no `file` and no `ref`: discards ALL uncommitted changes back to the last
- *     checkpoint (safe — does not move history, only resets the working tree).
- *   - With `ref` and no `file`: hard-resets the whole working tree AND branch history
- *     to that ref. This is destructive to any commits after it (though they remain
- *     recoverable via `git reflog` for a while) — always labeled with a warning.
+ * Restores working-tree files from a private Kode checkpoint or a supplied commit.
+ * It is scoped to the selected project, never changes the index/branch, and asks the
+ * user before overwriting files when command confirmation is enabled.
  */
-async function git_revert(params = {}, projectFolder) {
+async function git_revert(params = {}, projectFolder, toolContext = {}) {
   if (!projectFolder) return '❌ Error: git_revert requires an active project folder.';
   if (!gitToplevel(projectFolder)) return notAGitRepoError(projectFolder);
 
   const { file, ref } = params;
 
   try {
+    const recordPath = checkpointRecordPath(projectFolder);
+    let source = ref;
+    if (!source) {
+      const record = JSON.parse(fs.readFileSync(recordPath, 'utf-8'));
+      source = record.snapshot;
+    } else {
+      source = execFileSync('git', ['rev-parse', '--verify', '--end-of-options', `${source}^{commit}`], { cwd: projectFolder, encoding: 'utf-8', timeout: 10000 }).trim();
+    }
+
+    let target = '.';
     if (file) {
-      const args = ref ? ['checkout', ref, '--', file] : ['checkout', 'HEAD', '--', file];
-      execFileSync('git', args, { cwd: projectFolder, encoding: 'utf-8', timeout: 15000 });
-      return `✅ Reverted "${file}" to ${ref || 'the last checkpoint'}.`;
+      if (path.isAbsolute(file)) throw new Error('file must be a path inside the selected project.');
+      target = `:(literal)${path.normalize(file)}`;
+      if (target === '..' || target.startsWith(`..${path.sep}`)) throw new Error('file must stay inside the selected project.');
     }
-
-    if (ref) {
-      execFileSync('git', ['reset', '--hard', ref], { cwd: projectFolder, encoding: 'utf-8', timeout: 15000 });
-      return `⚠️ Hard-reset the whole project to "${ref}" — any commits after that point are no longer on this branch ` +
-        `(recoverable for a while via "git reflog" if this was a mistake).`;
+    if (typeof toolContext.confirmRiskyCommand === 'function') {
+      const approved = await toolContext.confirmRiskyCommand(`Restore ${file || 'selected project files'} from ${source.slice(0, 8)}`, 'restoring files from a Git checkpoint');
+      if (!approved) return '🚫 Restore cancelled by the user.';
     }
-
-    execFileSync('git', ['reset', '--hard', 'HEAD'], { cwd: projectFolder, encoding: 'utf-8', timeout: 15000 });
-    return '✅ Discarded all uncommitted changes — working tree restored to the last checkpoint.';
+    execFileSync('git', ['restore', '--source', source, '--worktree', '--', target], { cwd: projectFolder, encoding: 'utf-8', timeout: 30000 });
+    return `✅ Restored ${file ? `"${file}"` : 'tracked files in the selected project'} from ${source.slice(0, 8)}. The Git index and branch were not changed.`;
   } catch (err) {
     return `❌ git_revert failed: ${(err.stderr || err.message || '').toString().trim()}`;
   }
@@ -1425,7 +1536,7 @@ async function git_revert(params = {}, projectFolder) {
  * exact multi-line string. Falls back to a content-based search (see src/agent/patch.js)
  * when a hunk's line numbers are slightly off, which local models get wrong often.
  */
-async function apply_patch(params = {}, projectFolder) {
+async function apply_patch(params = {}, projectFolder, toolContext = {}) {
   const { patch } = params;
   if (!patch || typeof patch !== 'string') {
     return '❌ Error: "patch" parameter is required (a unified diff, as produced by `diff -u` or `git diff`).';
@@ -1450,7 +1561,12 @@ async function apply_patch(params = {}, projectFolder) {
       continue;
     }
 
-    const resolvedPath = path.isAbsolute(targetRel) ? targetRel : path.resolve(projectFolder || process.cwd(), targetRel);
+    const authorized = await resolveProjectPath(targetRel, projectFolder, toolContext, 'patch file');
+    if (authorized.error) {
+      results.push(authorized.error);
+      continue;
+    }
+    const resolvedPath = authorized.path;
 
     try {
       const isNewFile = fileEntry.oldPath === '/dev/null' || !fs.existsSync(resolvedPath);
@@ -1492,6 +1608,8 @@ async function apply_patch(params = {}, projectFolder) {
 async function run_tests(params = {}, projectFolder, toolContext = {}) {
   const command = (params.command && String(params.command).trim()) || 'npm test';
   const TEST_TIMEOUT = 180000; // 3 minutes — test suites run longer than a typical command
+  const authorization = await authorizeShellCommand(command, toolContext);
+  if (authorization.blocked) return authorization.result;
 
   try {
     const { stdout: rawStdout, stderr: rawStderr, code, timedOut, aborted } = await runShellCommandAsync(command, {
@@ -1526,7 +1644,7 @@ async function run_tests(params = {}, projectFolder, toolContext = {}) {
       truncated = output.substring(0, maxLen) + '\n\n... (output truncated)';
       savedNote = saveFullOutput(projectFolder, 'test-output', output);
     }
-    return `✅ Tests passed:\n$ ${command}\n\n${truncated || '(no output)'}${savedNote}`;
+    return `${authorization.warning}✅ Tests passed:\n$ ${command}\n\n${truncated || '(no output)'}${savedNote}`;
   } catch (err) {
     return `❌ Failed to run tests: ${friendlyShellSpawnError(err)}\n$ ${command}`;
   }
@@ -1540,12 +1658,11 @@ async function run_tests(params = {}, projectFolder, toolContext = {}) {
  * items off as it goes. The formatted checklist becomes part of the tool-execution
  * log the user sees in the UI, so it doubles as visible progress reporting.
  *
- * Persisted to <project>/.kode/plan.json (see agent/plan.js) whenever a project
+ * Persisted to Kode's per-user app data (see agent/plan.js) whenever a project
  * folder is active, so the plan — and how far through it the agent had gotten —
  * survives context trims, app restarts, and starting a fresh chat on the same
- * project. getSystemPrompt resurfaces an incomplete plan at the start of a new turn
- * so the model can pick up where it left off instead of the task being silently
- * forgotten. Cleared automatically once every step is marked done.
+ * project. AgentCore adds an incomplete plan to user context on the next turn so the
+ * model can pick up where it left off. Cleared automatically once every step is done.
  */
 async function write_plan(params = {}, projectFolder) {
   const { steps } = params;
@@ -1634,7 +1751,7 @@ async function semantic_search(params = {}, projectFolder, toolContext = {}) {
 
 /**
  * Tool: save_memory
- * Persists a durable fact/note for this project to <project>/.kode/memory.json, so it
+ * Persists a durable fact/note for this project in Kode's per-user app data, so it
  * survives context trims, app restarts, and new chats — unlike the in-session rolling
  * summary, this is explicit, inspectable, and only written when the model decides
  * something is actually worth remembering long-term.
@@ -2012,7 +2129,7 @@ const TOOL_SCHEMAS = [
     type: 'function',
     function: {
       name: 'git_checkpoint',
-      description: 'Stage and commit all current changes as a labeled safety-net checkpoint (auto-initializes a git repo on first use). Call this before a risky multi-file change, and after finishing a working change, so git_revert can always undo back to a known-good point.',
+      description: 'Create a private snapshot of the selected project working tree without staging files or changing the user branch/index. Requires an existing Git commit. Call before a risky change so git_revert can restore this snapshot.',
       parameters: {
         type: 'object',
         properties: {
@@ -2026,7 +2143,7 @@ const TOOL_SCHEMAS = [
     type: 'function',
     function: {
       name: 'git_revert',
-      description: 'Undo changes using git. With no params, discards all uncommitted changes back to the last checkpoint (safe). With "file", reverts just that file. With "ref" (a commit hash) and no file, hard-resets the WHOLE project to that commit — destructive to later history, use with care.',
+      description: 'Restore tracked working-tree files in the selected project from the last private Kode checkpoint or a supplied commit. The branch and index are unchanged; Kode asks before overwriting when confirmation is enabled.',
       parameters: {
         type: 'object',
         properties: {
@@ -2213,5 +2330,9 @@ Object.defineProperty(module.exports, '_resetShellPathCacheForTests', {
 });
 Object.defineProperty(module.exports, 'friendlyShellSpawnError', {
   value: friendlyShellSpawnError,
+  enumerable: false,
+});
+Object.defineProperty(module.exports, 'fetchWithTimeout', {
+  value: fetchWithTimeout,
   enumerable: false,
 });

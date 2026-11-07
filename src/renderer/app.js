@@ -430,15 +430,21 @@
     const el = chatTitle();
     if (!el) return;
     if (!state.currentModel) {
-      el.innerHTML = 'No model selected';
+      el.textContent = 'No model selected';
       return;
     }
     const modelLower = state.currentModel.toLowerCase();
     const isSecModel = ['deephat', 'dolphin', 'uncensored', 'abliterated', 'evil'].some(k => modelLower.includes(k));
-    const badge = isSecModel
-      ? ' <span style="background:linear-gradient(135deg,#ff4444,#cc0000);color:#fff;padding:2px 8px;border-radius:10px;font-size:11px;margin-left:8px;">🔓 Red Team</span>'
-      : '';
-    el.innerHTML = `Model: <strong>${state.currentModel}</strong>${badge}`;
+    el.replaceChildren(document.createTextNode('Model: '));
+    const modelName = document.createElement('strong');
+    modelName.textContent = state.currentModel;
+    el.append(modelName);
+    if (isSecModel) {
+      const badge = document.createElement('span');
+      badge.textContent = ' Red Team';
+      badge.style.cssText = 'background:linear-gradient(135deg,#ff4444,#cc0000);color:#fff;padding:2px 8px;border-radius:10px;font-size:11px;margin-left:8px;';
+      el.append(badge);
+    }
   }
 
   /* ==========================================================
@@ -2906,7 +2912,7 @@
 
     window.kode.onConfirmCommandRequest(({ requestId, command, label }) => {
       activeRequestId = requestId;
-      if (labelEl) labelEl.textContent = `⚠️ The agent wants to run a command involving ${label}. Review it before allowing.`;
+      if (labelEl) labelEl.textContent = `⚠️ The agent requests approval for ${label}. Review the action before allowing.`;
       // textContent (not innerHTML) — command text is untrusted (model/tool output)
       // and must never be interpreted as HTML.
       if (textEl) textEl.textContent = command;

@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { projectStatePath } = require('./projectStateStore');
 
 /**
  * Local semantic codebase search. search_files (tools.js) is grep — exact substring
@@ -11,13 +12,12 @@ const path = require('path');
  *
  * This builds a small local vector index using Ollama's embedding models (e.g.
  * `nomic-embed-text`, ~270MB, runs comfortably on CPU) — no cloud API, no extra
- * service, just a JSON file at <project>/.kode/embeddings.json. Good enough for a
+ * service, just a JSON file in Kode's per-user app data. Good enough for a
  * single project's worth of code; not meant to compete with a real vector database at
  * scale, but for the file counts a local dev project actually has, brute-force cosine
  * similarity over a few thousand chunks is fast enough to feel instant.
  */
 
-const INDEX_DIR_NAME = '.kode';
 const INDEX_FILE_NAME = 'embeddings.json';
 const DEFAULT_EMBED_MODEL = 'nomic-embed-text';
 
@@ -39,7 +39,7 @@ const SKIP_DIRS = new Set([
 ]);
 
 function indexFilePath(projectFolder) {
-  return path.join(projectFolder, INDEX_DIR_NAME, INDEX_FILE_NAME);
+  return projectStatePath(projectFolder, INDEX_FILE_NAME);
 }
 
 /** Recursively lists indexable files under root, relative paths, capped at MAX_FILES. */
@@ -152,8 +152,8 @@ async function buildIndex(projectFolder, embedClient, model = DEFAULT_EMBED_MODE
     records,
   };
 
-  fs.mkdirSync(path.dirname(indexFilePath(projectFolder)), { recursive: true });
-  fs.writeFileSync(indexFilePath(projectFolder), JSON.stringify(index), 'utf-8');
+  fs.mkdirSync(path.dirname(indexFilePath(projectFolder)), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(indexFilePath(projectFolder), JSON.stringify(index), { encoding: 'utf-8', mode: 0o600 });
 
   return { model: index.model, builtAt: index.builtAt, fileCount: index.fileCount, chunkCount: index.chunkCount, truncated: index.truncated };
 }

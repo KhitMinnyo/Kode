@@ -29,3 +29,23 @@ test('task state persists and clears per project', () => {
   assert.equal(taskState.clearTaskState(project), true);
   assert.equal(taskState.loadTaskState(project), null);
 });
+
+test('task state is stored outside the repository and ignores a planted legacy symlink', (t) => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kode-task-state-link-'));
+  const victim = path.join(os.tmpdir(), `kode-victim-${process.pid}-${Date.now()}.json`);
+  fs.writeFileSync(victim, '{"keep":true}');
+  fs.mkdirSync(path.join(project, '.kode'));
+  try {
+    fs.symlinkSync(victim, path.join(project, '.kode', 'task-state.json'));
+  } catch (err) {
+    if (process.platform === 'win32') t.skip(`Windows symlink privilege unavailable: ${err.message}`);
+    throw err;
+  }
+
+  const state = taskState.createTaskState('analyze the project');
+  assert.equal(taskState.saveTaskState(project, state), true);
+  assert.equal(taskState.taskStatePath(project).startsWith(path.resolve(project) + path.sep), false);
+  assert.deepEqual(JSON.parse(fs.readFileSync(victim, 'utf-8')), { keep: true });
+  assert.equal(taskState.loadTaskState(project).request, state.request);
+  fs.unlinkSync(victim);
+});

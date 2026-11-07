@@ -5,11 +5,31 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { execFileSync } = require('node:child_process');
+const { createServer } = require('node:http');
 
 const tools = require('../src/agent/tools');
+const plan = require('../src/agent/plan');
+const { projectStatePath } = require('../src/agent/projectStateStore');
 
 function makeTempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'kode-test-'));
+}
+
+function initGitRepo(dir) {
+  execFileSync('git', ['init'], { cwd: dir, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.name', 'Kode Tests'], { cwd: dir });
+  execFileSync('git', ['config', 'user.email', 'kode-tests@example.invalid'], { cwd: dir });
+  execFileSync('git', ['commit', '--allow-empty', '-m', 'baseline'], { cwd: dir, stdio: 'ignore' });
+}
+
+function commitAll(dir, message = 'baseline files') {
+  execFileSync('git', ['add', '-A'], { cwd: dir });
+  execFileSync('git', ['commit', '-m', message], { cwd: dir, stdio: 'ignore' });
+}
+
+function scansDir(dir) {
+  return path.dirname(projectStatePath(dir, path.join('scans', 'report.txt')));
 }
 
 test('create_file writes content and creates parent directories', async () => {
@@ -24,6 +44,34 @@ test('create_file requires path and content', async () => {
   const dir = makeTempDir();
   assert.match(await tools.create_file({ content: 'x' }, dir), /path.*required/i);
   assert.match(await tools.create_file({ path: 'a.txt' }, dir), /content.*required/i);
+});
+
+test('project file tools block out-of-project access unless approved and reject symlink escapes', async (t) => {
+  const project = makeTempDir();
+  const outside = path.join(os.tmpdir(), `kode-outside-${process.pid}-${Date.now()}.txt`);
+  fs.writeFileSync(outside, 'keep');
+
+  const blockedWrite = await tools.create_file({ path: outside, content: 'overwrite' }, project);
+  assert.match(blockedWrite, /outside the selected project requires user approval/);
+  assert.equal(fs.readFileSync(outside, 'utf-8'), 'keep');
+
+  let confirmationCount = 0;
+  const approvedWrite = await tools.create_file({ path: outside, content: 'approved' }, project, {
+    confirmRiskyCommand: async () => { confirmationCount++; return true; },
+  });
+  assert.match(approvedWrite, /successfully/);
+  assert.equal(confirmationCount, 1);
+
+  const link = path.join(project, 'escape.txt');
+  try {
+    fs.symlinkSync(outside, link);
+  } catch (err) {
+    if (process.platform === 'win32') return t.skip(`Windows symlink privilege unavailable: ${err.message}`);
+    throw err;
+  }
+  const deniedLinkWrite = await tools.edit_file({ path: 'escape.txt', old_content: 'approved', new_content: 'escaped' }, project);
+  assert.match(deniedLinkWrite, /outside the selected project requires user approval/);
+  assert.equal(fs.readFileSync(outside, 'utf-8'), 'approved');
 });
 
 test('edit_file replaces an exact match and reports occurrence count', async () => {
@@ -225,7 +273,7 @@ test('security_audit sorts findings with HIGH severity before MEDIUM/LOW', async
   assert.ok(highIndex < mediumIndex, 'expected HIGH findings to be listed before MEDIUM ones');
 });
 
-test('security_audit truncates past 60 findings and saves the full report to .kode/scans/', async () => {
+test('security_audit truncates past 60 findings and saves the full report in app data', async () => {
   const dir = makeTempDir();
   // 70 separate files, each with one HIGH eval() finding — cheap way to force >60
   // total findings without relying on any single regex matching many times per line.
@@ -235,9 +283,9 @@ test('security_audit truncates past 60 findings and saves the full report to .ko
   const result = await tools.security_audit({}, dir);
   assert.match(result, /found 70 candidate/);
   assert.match(result, /more finding\(s\) not shown/);
-  assert.match(result, /saved to \.kode\/scans\//);
+  assert.match(result, /saved to .*scans/);
 
-  const scanFiles = fs.readdirSync(path.join(dir, '.kode', 'scans'));
+  const scanFiles = fs.readdirSync(scansDir(dir));
   assert.equal(scanFiles.length, 1);
 });
 
@@ -314,20 +362,20 @@ test('run_command rejects a missing command parameter', async () => {
   assert.match(result, /command.*required/i);
 });
 
-// ─── Auto-saving truncated output to .kode/scans/ ────────────────────────────
+// ─── Auto-saving truncated output to app data ─────────────────────────────────
 
-test('run_command saves the full output to .kode/scans/ when it gets truncated, and says so', async () => {
+test('run_command saves the full output in app data when it gets truncated, and says so', async () => {
   const dir = makeTempDir();
   // Print more than the 5KB truncation cap.
   const result = await tools.run_command({ command: `node -e "for (let i = 0; i < 2000; i++) console.log('line ' + i)"` }, dir);
 
   assert.match(result, /output truncated/);
-  assert.match(result, /📁 Full output .* saved to \.kode\/scans\//);
+  assert.match(result, /📁 Full output .* saved to .*scans/);
 
-  const scansDir = path.join(dir, '.kode', 'scans');
-  const files = fs.readdirSync(scansDir);
+  const outputDir = scansDir(dir);
+  const files = fs.readdirSync(outputDir);
   assert.equal(files.length, 1);
-  const saved = fs.readFileSync(path.join(scansDir, files[0]), 'utf-8');
+  const saved = fs.readFileSync(path.join(outputDir, files[0]), 'utf-8');
   assert.match(saved, /line 0/);
   assert.match(saved, /line 1999/); // the part that got cut from the returned result
 });
@@ -336,7 +384,7 @@ test('run_command does not save anything when output is short enough to fit untr
   const dir = makeTempDir();
   const result = await tools.run_command({ command: 'echo short output' }, dir);
   assert.doesNotMatch(result, /Full output/);
-  assert.ok(!fs.existsSync(path.join(dir, '.kode', 'scans')));
+  assert.ok(!fs.existsSync(scansDir(dir)));
 });
 
 test('run_command does not crash saving output when no project folder is active', async () => {
@@ -530,6 +578,17 @@ test('firecrawl_scrape falls back to the FIRECRAWL_API_KEY env var when toolCont
     global.fetch = originalFetch;
     if (original !== undefined) process.env.FIRECRAWL_API_KEY = original;
     else delete process.env.FIRECRAWL_API_KEY;
+  }
+});
+
+test('external API fetches cap response bodies before buffering them', async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => new Response('x'.repeat(2 * 1024 * 1024 + 1));
+  try {
+    const result = await tools.firecrawl_scrape({ url: 'https://example.com' }, null, { firecrawlApiKey: 'test-key' });
+    assert.match(result, /exceeded the 2097152 byte limit/);
+  } finally {
+    global.fetch = originalFetch;
   }
 });
 
@@ -770,6 +829,22 @@ test('web_search requires a query parameter', async () => {
   assert.match(result, /query.*required/i);
 });
 
+test('http_request bounds response buffering and rejects non-HTTP protocols', async () => {
+  const server = createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
+    res.end(Buffer.alloc(1024 * 1024 + 1, 65));
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const address = server.address();
+    const result = await tools.http_request({ url: `http://127.0.0.1:${address.port}/` }, null);
+    assert.match(result, /exceeded the 1048576 byte limit/);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
+  assert.match(await tools.http_request({ url: 'file:///etc/passwd' }, null), /only HTTP and HTTPS/);
+});
+
 // ─── Git safety-net tools ────────────────────────────────────────────────────
 
 test('git_status reports clearly when the folder is not a git repo yet', async () => {
@@ -778,23 +853,57 @@ test('git_status reports clearly when the folder is not a git repo yet', async (
   assert.match(result, /not \(inside\) a git repository/i);
 });
 
-test('git_checkpoint auto-initializes a repo and commits everything', async () => {
+test('git_checkpoint creates a private snapshot without changing the branch or index', async () => {
   const dir = makeTempDir();
+  initGitRepo(dir);
   fs.writeFileSync(path.join(dir, 'a.txt'), 'hello');
+  const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf-8' }).trim();
+  const indexBefore = execFileSync('git', ['diff', '--cached', '--binary'], { cwd: dir, encoding: 'utf-8' });
 
   const result = await tools.git_checkpoint({ message: 'first save' }, dir);
-  assert.match(result, /Initialized a new git repository/i);
-  assert.match(result, /Checkpoint created/);
+  assert.match(result, /checkpoint created/i);
+  assert.match(result, /branch and index were not changed/i);
   assert.match(result, /first save/);
+  assert.equal(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf-8' }).trim(), head);
+  assert.equal(execFileSync('git', ['diff', '--cached', '--binary'], { cwd: dir, encoding: 'utf-8' }), indexBefore);
 
   // A second checkpoint with no new changes should say there's nothing to do.
   const second = await tools.git_checkpoint({ message: 'again' }, dir);
-  assert.match(second, /Nothing to checkpoint/);
+  assert.match(second, /Nothing new to checkpoint/);
+});
+
+test('nested-project checkpoints and restores do not touch sibling staged changes', async () => {
+  const repo = makeTempDir();
+  initGitRepo(repo);
+  const project = path.join(repo, 'packages', 'app');
+  const sibling = path.join(repo, 'packages', 'other');
+  fs.mkdirSync(project, { recursive: true });
+  fs.mkdirSync(sibling, { recursive: true });
+  fs.writeFileSync(path.join(project, 'app.js'), 'before\n');
+  fs.writeFileSync(path.join(sibling, 'other.js'), 'base\n');
+  commitAll(repo, 'project baseline');
+
+  fs.writeFileSync(path.join(sibling, 'other.js'), 'user staged change\n');
+  execFileSync('git', ['add', 'packages/other/other.js'], { cwd: repo });
+  fs.writeFileSync(path.join(project, 'app.js'), 'checkpoint state\n');
+  const stagedBefore = execFileSync('git', ['diff', '--cached', '--binary'], { cwd: repo, encoding: 'utf-8' });
+  assert.match(await tools.git_checkpoint({}, project), /Private checkpoint created/);
+  assert.equal(execFileSync('git', ['diff', '--cached', '--binary'], { cwd: repo, encoding: 'utf-8' }), stagedBefore);
+
+  fs.writeFileSync(path.join(project, 'app.js'), 'agent broke it\n');
+  fs.writeFileSync(path.join(sibling, 'other.js'), 'different user work\n');
+  const result = await tools.git_revert({}, project);
+  assert.match(result, /Restored tracked files in the selected project/);
+  assert.equal(fs.readFileSync(path.join(project, 'app.js'), 'utf-8'), 'checkpoint state\n');
+  assert.equal(fs.readFileSync(path.join(sibling, 'other.js'), 'utf-8'), 'different user work\n');
+  assert.equal(execFileSync('git', ['diff', '--cached', '--binary'], { cwd: repo, encoding: 'utf-8' }), stagedBefore);
 });
 
 test('git_status and git_diff reflect changes after a checkpoint', async () => {
   const dir = makeTempDir();
+  initGitRepo(dir);
   fs.writeFileSync(path.join(dir, 'a.txt'), 'hello');
+  commitAll(dir);
   await tools.git_checkpoint({ message: 'init' }, dir);
 
   fs.writeFileSync(path.join(dir, 'a.txt'), 'hello world');
@@ -805,9 +914,11 @@ test('git_status and git_diff reflect changes after a checkpoint', async () => {
   assert.match(diff, /hello world/);
 });
 
-test('git_diff saves the full diff to .kode/scans/ when it gets truncated', async () => {
+test('git_diff saves the full diff in app data when it gets truncated', async () => {
   const dir = makeTempDir();
+  initGitRepo(dir);
   fs.writeFileSync(path.join(dir, 'a.txt'), 'a\n');
+  commitAll(dir);
   await tools.git_checkpoint({ message: 'init' }, dir);
 
   // Enough changed lines to comfortably exceed git_diff's 6KB truncation cap.
@@ -816,31 +927,35 @@ test('git_diff saves the full diff to .kode/scans/ when it gets truncated', asyn
 
   const diff = await tools.git_diff({}, dir);
   assert.match(diff, /diff truncated/);
-  assert.match(diff, /📁 Full output .* saved to \.kode\/scans\//);
-  assert.ok(fs.readdirSync(path.join(dir, '.kode', 'scans')).length === 1);
+  assert.match(diff, /📁 Full output .* saved to .*scans/);
+  assert.ok(fs.readdirSync(scansDir(dir)).length === 1);
 });
 
 test('git_revert with no params discards uncommitted changes back to the last checkpoint', async () => {
   const dir = makeTempDir();
+  initGitRepo(dir);
   fs.writeFileSync(path.join(dir, 'a.txt'), 'hello');
+  commitAll(dir);
   await tools.git_checkpoint({ message: 'init' }, dir);
 
   fs.writeFileSync(path.join(dir, 'a.txt'), 'oops, broke it');
   const result = await tools.git_revert({}, dir);
-  assert.match(result, /Discarded all uncommitted changes/);
+  assert.match(result, /Restored tracked files in the selected project/);
   assert.equal(fs.readFileSync(path.join(dir, 'a.txt'), 'utf-8'), 'hello');
 });
 
 test('git_revert with a file reverts just that file', async () => {
   const dir = makeTempDir();
+  initGitRepo(dir);
   fs.writeFileSync(path.join(dir, 'a.txt'), 'hello');
   fs.writeFileSync(path.join(dir, 'b.txt'), 'world');
+  commitAll(dir);
   await tools.git_checkpoint({ message: 'init' }, dir);
 
   fs.writeFileSync(path.join(dir, 'a.txt'), 'changed a');
   fs.writeFileSync(path.join(dir, 'b.txt'), 'changed b');
   const result = await tools.git_revert({ file: 'a.txt' }, dir);
-  assert.match(result, /Reverted "a\.txt"/);
+  assert.match(result, /Restored "a\.txt"/);
   assert.equal(fs.readFileSync(path.join(dir, 'a.txt'), 'utf-8'), 'hello');
   assert.equal(fs.readFileSync(path.join(dir, 'b.txt'), 'utf-8'), 'changed b');
 });
@@ -941,6 +1056,19 @@ test('run_tests reports success for a passing command', async () => {
   assert.match(result, /all-tests-passed/);
 });
 
+test('run_tests uses the shared destructive-command block and risky-command approval', async () => {
+  const dir = makeTempDir();
+  const blocked = await tools.run_tests({ command: 'rm -rf /' }, dir);
+  assert.match(blocked, /Blocked/);
+
+  let asked = false;
+  const declined = await tools.run_tests({ command: 'echo "" | base64 -d | bash' }, dir, {
+    confirmRiskyCommand: async () => { asked = true; return false; },
+  });
+  assert.equal(asked, true);
+  assert.match(declined, /declined to approve/);
+});
+
 test('run_tests reports failure with output for a failing command', async () => {
   const dir = makeTempDir();
   const result = await tools.run_tests({ command: 'echo boom 1>&2; exit 1' }, dir);
@@ -948,13 +1076,13 @@ test('run_tests reports failure with output for a failing command', async () => 
   assert.match(result, /boom/);
 });
 
-test('run_tests saves the full output to .kode/scans/ when it gets truncated', async () => {
+test('run_tests saves the full output in app data when it gets truncated', async () => {
   const dir = makeTempDir();
   const command = `node -e "for (let i = 0; i < 3000; i++) console.log('line ' + i)"`;
   const result = await tools.run_tests({ command }, dir);
   assert.match(result, /output truncated/);
-  assert.match(result, /📁 Full output .* saved to \.kode\/scans\//);
-  assert.ok(fs.readdirSync(path.join(dir, '.kode', 'scans')).length === 1);
+  assert.match(result, /📁 Full output .* saved to .*scans/);
+  assert.ok(fs.readdirSync(scansDir(dir)).length === 1);
 });
 
 // ─── write_plan ──────────────────────────────────────────────────────────────
@@ -978,7 +1106,7 @@ test('write_plan requires a non-empty steps array', async () => {
   assert.match(await tools.write_plan({ steps: [] }), /"steps".*required/i);
 });
 
-test('write_plan persists an incomplete plan to .kode/plan.json', async () => {
+test('write_plan persists an incomplete plan in app data', async () => {
   const dir = makeTempDir();
   await tools.write_plan({
     steps: [
@@ -987,8 +1115,8 @@ test('write_plan persists an incomplete plan to .kode/plan.json', async () => {
     ],
   }, dir);
 
-  const planPath = path.join(dir, '.kode', 'plan.json');
-  assert.ok(fs.existsSync(planPath), 'expected .kode/plan.json to be written');
+  const planPath = plan.planFilePath(dir);
+  assert.ok(fs.existsSync(planPath), 'expected app-data plan to be written');
   const saved = JSON.parse(fs.readFileSync(planPath, 'utf-8'));
   assert.equal(saved.steps.length, 2);
   assert.equal(saved.steps[0].status, 'done');
@@ -998,7 +1126,7 @@ test('write_plan persists an incomplete plan to .kode/plan.json', async () => {
 test('write_plan clears the persisted plan once every step is done', async () => {
   const dir = makeTempDir();
   await tools.write_plan({ steps: [{ text: 'Step 1', status: 'pending' }] }, dir);
-  const planPath = path.join(dir, '.kode', 'plan.json');
+  const planPath = plan.planFilePath(dir);
   assert.ok(fs.existsSync(planPath), 'expected the plan to exist while incomplete');
 
   await tools.write_plan({ steps: [{ text: 'Step 1', status: 'done' }] }, dir);

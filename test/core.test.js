@@ -49,12 +49,17 @@ test('estimateTokens handles mixed ASCII/non-ASCII text by weighting each portio
   assert.equal(estimateTokens(mixed), expected);
 });
 
-test('parseToolCalls extracts well-formed ```tool blocks', () => {
-  const text = 'Sure, doing that now.\n```tool\n{"tool": "read_file", "params": {"path": "app.py"}}\n```\n';
+test('parseToolCalls extracts an action-only well-formed ```tool block', () => {
+  const text = '```tool\n{"tool": "read_file", "params": {"path": "app.py"}}\n```\n';
   const calls = parseToolCalls(text);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].tool, 'read_file');
   assert.deepEqual(calls[0].params, { path: 'app.py' });
+});
+
+test('parseToolCalls ignores tool blocks quoted inside assistant prose', () => {
+  const text = 'The README example is:\n```tool\n{"tool":"create_file","params":{"path":"x","content":"x"}}\n```';
+  assert.deepEqual(parseToolCalls(text), []);
 });
 
 test('parseToolCalls recovers from malformed JSON via regex fallback', () => {
@@ -620,15 +625,16 @@ test('_buildContextMessages falls back to a tool-name note when summarization fa
     history.push({ role: i % 2 === 0 ? 'user' : 'assistant', content: 'Tool results:\n[Tool Result: read_file]\n' + 'x'.repeat(300) });
   }
   const messages = await core._buildContextMessages(systemMessage, history, 2048, 'model-a');
-  const summaryMsg = messages.find(m => m.role === 'system' && m !== systemMessage);
+  const summaryMsg = messages.find(m => m.role === 'user' && m !== systemMessage);
   assert.ok(summaryMsg, 'expected a fallback context note to be injected');
   assert.match(summaryMsg.content, /Previously completed/);
 });
 
-test('_buildContextMessages caches the full text of dropped history to .kode/scratch/ when a project folder is active', async () => {
+test('_buildContextMessages caches dropped history in app data when a project folder is active', async () => {
   const fs = require('node:fs');
   const os = require('node:os');
   const path = require('node:path');
+  const { projectStatePath } = require('../src/agent/projectStateStore');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kode-test-'));
 
   const mockClient = {
@@ -644,11 +650,11 @@ test('_buildContextMessages caches the full text of dropped history to .kode/scr
   }
 
   const messages = await core._buildContextMessages(systemMessage, history, 2048, 'model-a', dir);
-  const summaryMsg = messages.find(m => m.role === 'system' && m !== systemMessage);
+  const summaryMsg = messages.find(m => m.role === 'user' && m !== systemMessage);
   assert.ok(summaryMsg, 'expected a fallback context note to be injected');
-  assert.match(summaryMsg.content, /saved to \.kode\/scratch\//);
+  assert.match(summaryMsg.content, /saved to .*dropped-history\.txt/);
 
-  const scratchDir = path.join(dir, '.kode', 'scratch');
+  const scratchDir = path.dirname(projectStatePath(dir, path.join('scratch', 'dropped-history.txt')));
   const files = fs.readdirSync(scratchDir);
   assert.equal(files.length, 1);
   const saved = fs.readFileSync(path.join(scratchDir, files[0]), 'utf-8');
@@ -681,10 +687,11 @@ test('_buildContextMessages does not create a scratch file for a small drop not 
 
   const messages = await core._buildContextMessages(systemMessage, history, 250, 'model-a', dir);
   assert.ok(messages.length < history.length + 1, 'expected this budget to actually drop something, or the test proves nothing');
-  assert.ok(!fs.existsSync(path.join(dir, '.kode', 'scratch')), 'expected no scratch file for a small drop');
+  const { projectStatePath } = require('../src/agent/projectStateStore');
+  assert.ok(!fs.existsSync(path.dirname(projectStatePath(dir, path.join('scratch', 'dropped-history.txt')))), 'expected no scratch file for a small drop');
 });
 
-test('_buildContextMessages persists a generated summary to .kode/context-cache.json, and a fresh AgentCore instance reuses it instead of re-summarizing', async () => {
+test('_buildContextMessages persists a generated summary in app data and reuses it instead of re-summarizing', async () => {
   const fs = require('node:fs');
   const os = require('node:os');
   const path = require('node:path');
@@ -704,14 +711,14 @@ test('_buildContextMessages persists a generated summary to .kode/context-cache.
   }
 
   const messages1 = await core1._buildContextMessages(systemMessage, history, 2048, 'model-a', dir);
-  const summaryMsg1 = messages1.find(m => m.role === 'system' && m !== systemMessage);
+  const summaryMsg1 = messages1.find(m => m.role === 'user' && m !== systemMessage);
   assert.ok(summaryMsg1, 'expected a summary message to be injected');
   assert.match(summaryMsg1.content, /DISTINCTIVE-SUMMARY-abc123/);
 
   // It should have been persisted to disk under this conversation's fingerprint.
   const fingerprint = core1._conversationFingerprint('model-a', history);
   const onDisk = contextCache.getEntry(dir, fingerprint);
-  assert.ok(onDisk, 'expected the summary to be persisted to .kode/context-cache.json');
+  assert.ok(onDisk, 'expected the summary to be persisted in app data');
   assert.match(onDisk.summary, /DISTINCTIVE-SUMMARY-abc123/);
 
   // A brand-new AgentCore instance (simulating an app restart, or a fresh tab picking
@@ -725,7 +732,7 @@ test('_buildContextMessages persists a generated summary to .kode/context-cache.
   };
   const core2 = new AgentCore(mockClient2, 2048);
   const messages2 = await core2._buildContextMessages(systemMessage, history, 2048, 'model-a', dir);
-  const summaryMsg2 = messages2.find(m => m.role === 'system' && m !== systemMessage);
+  const summaryMsg2 = messages2.find(m => m.role === 'user' && m !== systemMessage);
   assert.ok(summaryMsg2, 'expected the fresh instance to still inject a summary message');
   assert.match(summaryMsg2.content, /DISTINCTIVE-SUMMARY-abc123/, 'expected the fresh instance to reuse the cached summary rather than fail or fall back');
 });
@@ -745,7 +752,7 @@ test('_buildContextMessages still generates a summary normally when no project f
 
   // No projectFolder argument at all.
   const messages = await core._buildContextMessages(systemMessage, history, 2048, 'model-a');
-  const summaryMsg = messages.find(m => m.role === 'system' && m !== systemMessage);
+  const summaryMsg = messages.find(m => m.role === 'user' && m !== systemMessage);
   assert.ok(summaryMsg, 'expected a summary message to still be injected without a project folder');
   assert.match(summaryMsg.content, /a summary with no project folder involved/);
 });
@@ -894,7 +901,7 @@ test('processMessage asks the model to retry when a ```tool block is unparseable
         return { text: '```tool\nthis is not json and has no tool field\n```', toolCalls: [] };
       }
       if (chatCallCount === 2) {
-        return { text: 'Got it, retrying.\n```tool\n{"tool": "read_file", "params": {"path": "a.py"}}\n```', toolCalls: [] };
+        return { text: '```tool\n{"tool": "read_file", "params": {"path": "a.py"}}\n```', toolCalls: [] };
       }
       // Includes the "✅ Done" marker core.js now looks for after a tool call, so the
       // turn ends here in one shot rather than the stall-nudge retrying it (see
@@ -1141,6 +1148,7 @@ test('processMessage nudges a premature "✅ Done" claim when the saved plan sti
   ]);
 
   let chatCallCount = 0;
+  let firstCallMessages = null;
   let secondCallMessages = null;
   const mockClient = {
     getContextSize: async () => 8192,
@@ -1148,6 +1156,7 @@ test('processMessage nudges a premature "✅ Done" claim when the saved plan sti
     chat: async (model, messages) => {
       chatCallCount++;
       if (chatCallCount === 1) {
+        firstCallMessages = messages;
         // Declares done with zero tool calls this turn — nothing for the
         // syntax/test checks to look at, only the plan-completeness check can catch this.
         return { text: '✅ Done: all set.', toolCalls: [] };
@@ -1163,6 +1172,8 @@ test('processMessage nudges a premature "✅ Done" claim when the saved plan sti
   const result = await core.processMessage('finish the plan', 'test-model', [], () => {}, () => {}, dir, () => {});
 
   assert.equal(chatCallCount, 2, 'expected exactly one nudge round trip');
+  assert.ok(firstCallMessages.some(m => m.role === 'user' && /Untrusted saved checklist/.test(m.content)));
+  assert.ok(firstCallMessages.some(m => m.role === 'user' && /Add rate limiting/.test(m.content)));
   assert.ok(secondCallMessages, 'expected a second chat() call after the nudge');
   const nudgeMessage = secondCallMessages[secondCallMessages.length - 1];
   assert.equal(nudgeMessage.role, 'user');
