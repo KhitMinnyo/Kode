@@ -94,20 +94,30 @@ test('list() sorts most-recently-started process first', async () => {
   assert.equal(list[1].pid, 1);
 });
 
-test('stop() fails gracefully (returns false, no throw, no exit event) when the OS process no longer exists', () => {
+test('stop() fails gracefully (returns false, no throw, no exit event) when the OS process no longer exists', (t) => {
+  if (process.platform === 'win32') {
+    t.skip('taskkill is asynchronous on Windows, so an unknown PID cannot be synchronously verified');
+    return;
+  }
   const pm = makeManager();
-  // A pid this high is essentially guaranteed not to correspond to a real process,
-  // and child is null, so stop() has to fall through both kill attempts and hit
-  // its catch — this is the "server already died outside of Kode" case.
+  // Simulate a platform kill primitive reporting that this pid does not exist.
+  // On Windows taskkill is spawned asynchronously; a synthetic PID is therefore
+  // not a reliable way to test the failure path across all platforms.
+  const originalKill = process.kill;
+  process.kill = () => { throw Object.assign(new Error('no such process'), { code: 'ESRCH' }); };
   pm.register({ pid: 6060606, command: 'node server.js', cwd: null, port: null, child: null });
 
   let exitEventFired = false;
   pm.on('exit', () => { exitEventFired = true; });
 
-  const result = pm.stop(6060606);
-  assert.equal(result, false);
-  assert.equal(exitEventFired, false);
-  assert.equal(pm.list()[0].status, 'running', 'a failed stop() should not have mutated status');
+  try {
+    const result = pm.stop(6060606);
+    assert.equal(result, false);
+    assert.equal(exitEventFired, false);
+    assert.equal(pm.list()[0].status, 'running', 'a failed stop() should not have mutated status');
+  } finally {
+    process.kill = originalKill;
+  }
 });
 
 test('stop() is a no-op for a process that is already marked exited', () => {
